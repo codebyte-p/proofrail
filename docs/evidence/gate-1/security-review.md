@@ -1,0 +1,128 @@
+# Gate 1 Security Review Log
+
+Gate 1 requires an independent security review of the parser, path, policy,
+redaction, and atomic-output boundaries before it can close. That review is not
+complete: most of those boundaries do not exist yet.
+
+This file is the running log. Each entry records what was reviewed, by whom, what
+was found, and how it was resolved. **No entry here constitutes the Gate 1
+independent verdict.** Under `AI_MAINTAINERS.md`, Claude may implement a task but
+may not supply its own decisive security approval; the reviews below were
+performed by a Claude reviewer agent within the implementing session and are
+therefore *self-review*. Codex or another approved independent reviewer must
+still validate these diffs and this evidence.
+
+## Boundary coverage
+
+| Boundary | Reviewed | Outcome |
+|---|---|---|
+| Git invocation and revision binding | 2026-09-16 | 2 confirmed defects, both fixed; see R1 |
+| Path normalization | 2026-09-16 | No findings |
+| Redaction | 2026-09-16 (by fuzzing) | 1 confirmed defect, fixed; see R2 |
+| Bounded parsers | not yet written | pending |
+| Policy evaluator | not yet written | pending |
+| Atomic output | not yet written | pending |
+| Independent (non-Claude) review | not started | pending |
+
+---
+
+## R1 — `internal/gitdiff` resource limits enforced after allocation
+
+- **Reviewed:** `internal/gitdiff/{model,path,git}.go` at `f6afaf6`
+- **Reviewer:** Claude reviewer agent (self-review, not the independent verdict)
+- **Resolved in:** `15e3173`
+
+### R1.1 Content limit enforced after the full object was buffered — confirmed, high
+
+Every Git invocation buffered the whole of stdout into a `bytes.Buffer` before
+parsing. `readBlobs` checked object sizes against the budget only while walking
+that already-materialized buffer. A hostile pull request containing one very
+large file would therefore have the entire object resident in memory before the
+50 MiB aggregate cap was consulted, producing an out-of-memory kill.
+
+This defeated the architecture invariant that limit exhaustion yields
+`incomplete` and exit code 2. An OOM is neither `incomplete` nor controlled, and
+it is directly reachable from repository-controlled content.
+
+**Fix:** Git output is consumed as a stream. The per-object check runs before the
+body is allocated, written as `total > maxBytes-size` so an absurd reported size
+cannot overflow past it. A consumer that stops early kills the child process and
+drains its pipe.
+
+**Regression test:** `TestLoadNeverReadsMoreObjectBytesThanTheLimitAllows`
+measures allocation rather than only the returned error code, because the
+returned code was already correct — the defect was upstream of the per-object
+check. Verified RED against the previous implementation, which allocated
+134,638,392 bytes for a 32 MiB file under a 64 KiB limit.
+
+### R1.2 Changed-file limit reached only after full raw-diff output was buffered — confirmed, medium
+
+The same buffer-then-check shape applied to `git diff --raw` and `--numstat`. A
+commit with very many entries materialized its complete output before the
+5,000-file cap was consulted. Lower magnitude than R1.1, bounded by path length
+rather than arbitrary object size, but the same architectural gap.
+
+**Fix:** both are parsed incrementally with the limit enforced per record, so
+peak cost is proportional to the limit rather than to the commit presented.
+
+### R1.3 Aggregate budget charged per unique object, not per file — confirmed, medium
+
+Git content-addresses identical files to one object. Charging the budget per
+unique object let a pull request adding many copies of one large file pass a
+budget those files should have exhausted, since analyzers receive the content
+once per file.
+
+**Fix:** the aggregate is charged per file, which is the surface analyzers
+actually receive. `TestLoadCountsDuplicateContentOncePerFile` covers it.
+
+### Reviewed and found sound
+
+- Git hardening: rebuilt environment, disabled system and global config,
+  `core.hooksPath` redirected to a loader-owned empty directory, `--no-ext-diff`,
+  `--no-textconv`, neutralized `diff.external` and LFS/clean/smudge filters, and
+  content read through `cat-file`, which never applies a smudge filter. No
+  additional config key was identified for the read-only subcommands invoked.
+- Revision binding: full-hash validation plus
+  `rev-parse --verify --end-of-options <sha>^{commit}` with exact self-resolution
+  correctly rejects abbreviated hashes, symbolic refs, and non-commit objects.
+- `-z` parsing cannot be desynchronized by adversarial path content, because Git
+  disables C-style quoting under `-z` and a tree entry path cannot contain NUL.
+- `NormalizeRepoPath` rejects NUL, control bytes, backslashes, drive letters,
+  UNC forms, absolute paths, root-escaping traversal, trailing separators,
+  oversized paths, and invalid UTF-8, and performs no filesystem access.
+- The changed-file limit boundary is exact: `>=` before append admits the
+  configured maximum and rejects the next record.
+- Symlink and submodule entries never have their objects fetched.
+
+---
+
+## R2 — Redaction ordering allowed a credential to bypass every detector
+
+- **Found by:** `FuzzRedact`, 3 seconds into a 30-second run
+- **Resolved in:** `893864d`
+
+Control bytes were stripped *after* shape detection. A value such as
+`AKIA00000000\x030000000` therefore matched no detector as a contiguous run, and
+the control byte was then removed on the way out, reassembling the real access
+key inside the evidence excerpt.
+
+This is a credential-exposure path, not a formatting nit: evidence is redacted
+once before it reaches findings, logs, and SARIF.
+
+**Fix:** control bytes are stripped before any detector runs, so detectors see
+exactly the text a reader will see. Shape detection then runs before the
+key-name rule so a recognizable credential keeps its precise kind.
+
+**Regression:** the failing input is retained as a fuzz corpus seed at
+`internal/finding/testdata/fuzz/FuzzRedact/a887510a52598d35`. `FuzzRedact` ran a
+further 60 seconds after the fix with no new failures.
+
+---
+
+## Outstanding
+
+- An independent, non-Claude reviewer must validate every diff and this evidence
+  before Gate 1 closes.
+- Plan amendments 1, 2, and 3 are proposed and unaccepted; see the Gate 1 plan.
+- `go test -race` has not run on the development workstation (no C toolchain).
+  CI runs it on `ubuntu-latest`; a run link must be recorded before promotion.
