@@ -79,3 +79,66 @@ Production code written before its test must be removed and reimplemented test-f
 - Record evidence in `docs/evidence/gate-N/`; do not replace evidence with claims in prose.
 
 When a plan and implementation disagree, stop and update the plan through review before continuing. When a security requirement is ambiguous, choose the fail-closed behavior and escalate the ambiguity to the repository owner.
+
+## Build and verification commands
+
+```bash
+go test ./...                 # full suite
+go vet ./...
+gofmt -l .                    # must print nothing
+go build ./...
+```
+
+Focused runs:
+
+```bash
+go test ./internal/parser/workflow -run TestParse -v
+go test ./internal/analyzer/workflow -run 'TestRuleDetectsMaliciousFixture/PFR-WF-004' -v
+```
+
+Fuzzing. `-fuzz` takes a regex that must match exactly one target in exactly one package; `internal/parser/{workflow,npm,python}` all name their target `FuzzParse`, so a `./internal/parser/...` wildcard fails with "cannot use -fuzz flag with multiple packages". Without `-fuzz`, the seed corpus runs as ordinary unit tests, which is what `go test ./...` does.
+
+```bash
+go test ./internal/parser/npm -fuzz=FuzzParse -fuzztime=60s
+```
+
+A crasher is written to `internal/<pkg>/testdata/fuzz/FuzzParse/<hash>`. Commit it: it replays on every later `go test` and is the regression test.
+
+Dependency policy requires a vulnerability scan, and the binary is not installed by default:
+
+```bash
+go install golang.org/x/vuln/cmd/govulncheck@latest
+"$(go env GOPATH)/bin/govulncheck" -show verbose ./...
+```
+
+`go test -race` does not build on the Windows workstation (no C toolchain). Race evidence comes from `.github/workflows/ci.yml` on `ubuntu-latest`. CI also runs `go test ./... -run TestCanonical -count=100` for determinism.
+
+## Dependency direction
+
+`internal/finding` and `internal/gitdiff` are leaves and import only the standard library. Everything else flows one way:
+
+```
+analyzer/* ──> parser/* ──> run ──> finding
+     └──────────────────────> gitdiff <──┘
+```
+
+An import that reverses an arrow is an import cycle. Amendment 1 (enums in `finding`, aliased from `run`) and Amendment 3 (`gitdiff` owns its narrow `Limits`) exist because the plan's literal wording would have closed one.
+
+## Parser and analyzer conventions
+
+Every parser exposes `Parse*(path string, content []byte, maxBytes int64) (Model, []run.Diagnostic)` and returns **the zero model on any diagnostic** — never a partially populated one a caller might act on. Bounds are checked before the decoder sees the input.
+
+Diagnostics and coverage notes are not interchangeable:
+
+- **Diagnostic** — the input could not be read. Drives `failed` completion, `incomplete`, exit code `2`.
+- **Coverage note** — the input was read but a field is not modeled. The run stays complete and states what it did not cover.
+
+A `Scalar` carries `Value` plus source `Position`. `Present()` means *written*, which an **empty string satisfies** — guard on `Value != ""` when a name will key a map. A fuzz-found defect (`name = ""` in `uv.lock`) collided every empty name into one entry.
+
+Analyzers return a result, never an `error`: a caller could ignore an error and read missing analysis as a pass. `failed` completion **retains** findings from inputs that were fully analyzed. `finding.Finalize` is the only way to obtain a canonical `Finding`. Sanitize repository-supplied strings to printable ASCII before they reach a message, locator, or excerpt.
+
+Diagnostic locators are `<file>#<pointer>`, e.g. `.github/workflows/ci.yml#jobs.build.steps[0].run`.
+
+## Current state
+
+Tasks 1–5 complete; Task 6 (PFR-DIFF) is next. Amendments 1, 3, 4, 6 accepted; 2 is historical context only. **Amendment 5 blocks Task 10** — its Task 10 contract wording is unreconciled; see the open question in the Gate 1 plan.
