@@ -38,7 +38,7 @@ redaction limits, or non-synthetic repository identifiers.
 | 7 | P95 below 60 seconds for 5,000 changed lines and 100 changed supported files | `benchmarks/results.json` | pending |
 | 8 | No network request during analysis, verified in an isolated environment | `tests/summary.json` | pending |
 | 9 | Policy evaluation satisfies the ADR 0001 operator, termination, adversarial-policy, fixed-clock, waiver-containment, fuzz, and fault-injection obligations | `tests/summary.json` | pending |
-| 10 | Independent security review of parser, path, policy, redaction, and atomic-output boundaries | `security-review.md` | partial (git, path, redaction reviewed; 3 defects fixed; independent non-Claude verdict outstanding) |
+| 10 | Independent security review of parser, path, policy, redaction, and atomic-output boundaries | `security-review.md` | partial (git, path, redaction reviewed; PR #1 independent review returned REQUEST_CHANGES with 6 high and 8 medium findings, all 14 now fixed with regression tests; re-review outstanding) |
 | 11 | Shadow-mode pilot on ProofRail and at least two authorized public repositories | `promotion.md` | pending |
 
 ## Task ledger

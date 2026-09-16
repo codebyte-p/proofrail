@@ -34,18 +34,50 @@ func evaluate(base, head Snapshot) []finding.Finding {
 // ----------------------------------------------------------------------------
 
 func ruleManifestLockMismatch(base, head Snapshot) []finding.Finding {
-	// With no lock in the change set there is nothing to be out of step with,
-	// and reporting every declaration as unresolved would be noise.
-	if len(head.Resolved) == 0 {
-		return nil
+	var out []finding.Finding
+	for _, eco := range ecosystems {
+		out = append(out, mismatchForEcosystem(eco, base, head)...)
+	}
+	return out
+}
+
+// mismatchForEcosystem reports the three shapes of manifest/lock disagreement.
+//
+// Keying off "the change set contained resolved packages" was not enough: a
+// change that only edits the manifest, and a change that deletes the lockfile
+// outright, both leave no resolutions to compare against and so evaded the rule
+// entirely. Lock state is now a recorded fact rather than an inference from how
+// many packages happened to be resolved.
+func mismatchForEcosystem(eco Ecosystem, base, head Snapshot) []finding.Finding {
+	// Removing the lockfile unbinds every dependency at once and needs no
+	// declaration to have changed.
+	if head.LockDeleted[eco] {
+		return []finding.Finding{{
+			RuleID:       "PFR-DEP-001",
+			AnalyzerID:   ID,
+			Severity:     finding.SeverityHigh,
+			Confidence:   finding.ConfidenceHigh,
+			DecisionHint: finding.DecisionBlock,
+			Message: "The " + string(eco) + " lockfile is deleted by this change, so every dependency it pinned " +
+				"resolves freshly at install time and the build is no longer bound to the artifacts that were reviewed.",
+			Locations: []finding.Location{{Path: lockPathFor(eco), StartLine: 1, EndLine: 1}},
+			Evidence: []finding.Evidence{{
+				Kind:    "dependency_declaration",
+				Source:  lockPathFor(eco),
+				Excerpt: "lockfile deleted",
+			}},
+			Limitations: []string{
+				"A project that intentionally stops pinning produces this same evidence; the reason has to come from the pull request itself.",
+			},
+		}}
 	}
 
-	resolved := head.resolvedByName()
 	baseDeclared := base.declaredNames()
+	resolved := head.resolvedByName()
 
-	var unresolved []Declared
+	var unresolved, inconsistent []Declared
 	for _, d := range head.Declared {
-		if _, ok := resolved[d.Name]; ok {
+		if d.Ecosystem != eco || !d.LockResolved() {
 			continue
 		}
 		// A workspace or local path dependency is resolved by layout rather
@@ -53,22 +85,40 @@ func ruleManifestLockMismatch(base, head Snapshot) []finding.Finding {
 		if d.Source == SourcePath || d.Source == SourceWorkspace {
 			continue
 		}
-		// Only report what this change introduced; a pre-existing mismatch is
-		// not something this pull request did.
-		if _, existed := baseDeclared[d.Name]; existed {
-			continue
+		previous, existed := baseDeclared[recordKey(d.Ecosystem, d.Name)]
+		newDeclaration := !existed
+		changedSpec := existed && previous.Spec != d.Spec
+
+		r, isResolved := resolved[recordKey(d.Ecosystem, d.Name)]
+		switch {
+		case !head.LockSeen[eco]:
+			// No lockfile was part of this change. Only a declaration this
+			// change introduced or altered is attributable to it.
+			if newDeclaration || changedSpec {
+				unresolved = append(unresolved, d)
+			}
+		case !isResolved:
+			if newDeclaration || changedSpec {
+				unresolved = append(unresolved, d)
+			}
+		case d.Pinned != "" && r.Version != "" && d.Pinned != r.Version:
+			// The name is present but the lock resolved a different version
+			// than the manifest pins. Checking presence alone missed this.
+			inconsistent = append(inconsistent, d)
 		}
-		unresolved = append(unresolved, d)
 	}
-	if len(unresolved) == 0 {
+
+	if len(unresolved) == 0 && len(inconsistent) == 0 {
 		return nil
 	}
-
 	sort.Slice(unresolved, func(i, j int) bool { return unresolved[i].Name < unresolved[j].Name })
+	sort.Slice(inconsistent, func(i, j int) bool { return inconsistent[i].Name < inconsistent[j].Name })
 
-	names := make([]string, 0, len(unresolved))
-	evidence := make([]finding.Evidence, 0, len(unresolved))
-	locations := make([]finding.Location, 0, len(unresolved))
+	var (
+		names     []string
+		evidence  []finding.Evidence
+		locations []finding.Location
+	)
 	for _, d := range unresolved {
 		names = append(names, safe(d.Name))
 		evidence = append(evidence, finding.Evidence{
@@ -78,6 +128,23 @@ func ruleManifestLockMismatch(base, head Snapshot) []finding.Finding {
 		})
 		locations = append(locations, location(d.Path, d.Pos))
 	}
+	for _, d := range inconsistent {
+		names = append(names, safe(d.Name))
+		evidence = append(evidence, finding.Evidence{
+			Kind:    "dependency_declaration",
+			Source:  d.Path + " " + d.Kind,
+			Excerpt: d.Name + " pins " + d.Pinned + ", lock resolves " + resolved[recordKey(d.Ecosystem, d.Name)].Version,
+		})
+		locations = append(locations, location(d.Path, d.Pos))
+	}
+
+	detail := "with no matching resolution in the lockfile"
+	if !head.LockSeen[eco] {
+		detail = "without any lockfile update in this change"
+	}
+	if len(unresolved) == 0 {
+		detail = "at a version the lockfile does not resolve"
+	}
 
 	return []finding.Finding{{
 		RuleID:       "PFR-DEP-001",
@@ -85,15 +152,25 @@ func ruleManifestLockMismatch(base, head Snapshot) []finding.Finding {
 		Severity:     finding.SeverityHigh,
 		Confidence:   finding.ConfidenceHigh,
 		DecisionHint: finding.DecisionBlock,
-		Message: "The manifest declares " + strings.Join(names, ", ") +
-			" with no matching resolution in the lockfile, so the build is not reproducibly bound to a specific artifact.",
+		Message: "The manifest declares " + strings.Join(names, ", ") + " " + detail +
+			", so the build is not reproducibly bound to a specific artifact.",
 		Locations: locations,
 		Evidence:  evidence,
 		Limitations: []string{
-			"A lockfile regenerated outside this change set would resolve the mismatch without any edit appearing here.",
-			"Workspace and local path dependencies are resolved by repository layout rather than by the lockfile and are excluded.",
+			"A lockfile regenerated outside this change set would resolve the mismatch without any edit appearing here, and a project that keeps no lockfile at all produces this same evidence.",
+			"Workspace and local path dependencies are resolved by repository layout rather than by the lockfile and are excluded, as are build requirements the build frontend installs in an isolated environment.",
+			"Only an exact version pin is compared against the lockfile; version 1 does not evaluate whether a range is satisfied.",
 		},
 	}}
+}
+
+// lockPathFor names the lockfile an ecosystem binds with, for the case where the
+// file was deleted and carries no surviving declaration to point at.
+func lockPathFor(eco Ecosystem) string {
+	if eco == EcosystemPython {
+		return "uv.lock"
+	}
+	return "package-lock.json"
 }
 
 // ----------------------------------------------------------------------------
@@ -113,13 +190,18 @@ func ruleNonRegistryDependency(base, head Snapshot) []finding.Finding {
 			// lock resolution rather than by this rule.
 			continue
 		}
-		if previous, existed := baseDeclared[d.Name]; existed && previous.Spec == d.Spec {
+		if previous, existed := baseDeclared[recordKey(d.Ecosystem, d.Name)]; existed && previous.Spec == d.Spec {
 			continue
 		}
 
+		// docs/analyzers.md blocks when a source is mutable *or* outside the
+		// repository. A local path that climbs out of the tree is outside it
+		// just as surely as a Git URL, and testing only Git and URL sources
+		// routed such a path to review.
 		// Outside the repository or mutable means the bytes a build fetches can
 		// change without any change here; that is the blocking condition.
-		outsideRepository := d.Source == SourceGit || d.Source == SourceURL
+		outsideRepository := d.Source == SourceGit || d.Source == SourceURL ||
+			(d.Source == SourcePath && pathEscapesRepository(d.Spec))
 		decision := finding.DecisionRequireReview
 		severity := finding.SeverityMedium
 		if !d.Immutable && outsideRepository {
@@ -163,7 +245,7 @@ func ruleLifecycleExecution(base, head Snapshot) []finding.Finding {
 			script.Name != "build-backend" {
 			continue
 		}
-		before, existed := previous[script.Name]
+		before, existed := previous[recordKey(script.Ecosystem, script.Name)]
 		if existed && before.Body == script.Body {
 			continue
 		}
@@ -205,7 +287,7 @@ func ruleResolvedSourceChanged(base, head Snapshot) []finding.Finding {
 
 	var out []finding.Finding
 	for _, current := range head.Resolved {
-		before, existed := previous[current.Name]
+		before, existed := previous[recordKey(current.Ecosystem, current.Name)]
 		if !existed {
 			continue
 		}
@@ -261,7 +343,7 @@ func ruleGraphExpansion(base, head Snapshot) []finding.Finding {
 
 	var added []Declared
 	for _, d := range head.Declared {
-		if _, existed := baseDeclared[d.Name]; !existed {
+		if _, existed := baseDeclared[recordKey(d.Ecosystem, d.Name)]; !existed {
 			added = append(added, d)
 		}
 	}
@@ -331,18 +413,24 @@ func ruleNameSimilarity(base, head Snapshot) []finding.Finding {
 		return nil
 	}
 
-	existing := make([]string, 0, len(baseDeclared))
-	for name := range baseDeclared {
-		existing = append(existing, name)
+	// Typosquatting happens within one registry, so a candidate is only
+	// compared against names from its own ecosystem. Collecting from the slice
+	// rather than from map keys also keeps the comparison list free of the
+	// namespacing prefix.
+	existingByEcosystem := make(map[Ecosystem][]string, len(ecosystems))
+	for _, d := range base.Declared {
+		existingByEcosystem[d.Ecosystem] = append(existingByEcosystem[d.Ecosystem], d.Name)
 	}
-	sort.Strings(existing)
+	for eco := range existingByEcosystem {
+		sort.Strings(existingByEcosystem[eco])
+	}
 
 	var out []finding.Finding
 	for _, d := range head.Declared {
-		if _, existed := baseDeclared[d.Name]; existed {
+		if _, existed := baseDeclared[recordKey(d.Ecosystem, d.Name)]; existed {
 			continue
 		}
-		neighbour, similar := nearestNeighbour(d.Name, existing)
+		neighbour, similar := nearestNeighbour(d.Name, existingByEcosystem[d.Ecosystem])
 		if !similar {
 			continue
 		}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -69,6 +70,22 @@ func changed(path string, base, head []byte) gitdiff.FileChange {
 // on both sides, which is how a lock appears when only the manifest moved.
 func unchanged(path string, content []byte) gitdiff.FileChange {
 	return changed(path, content, content)
+}
+
+// analyzeWithLimits runs the analyzer under caller-chosen bounds, so a budget
+// can be exercised without building a corpus large enough to hit the real one.
+func analyzeWithLimits(t *testing.T, limits run.Limits, files ...gitdiff.FileChange) run.AnalyzerResult {
+	t.Helper()
+	return dependency.New().Analyze(context.Background(), run.AnalysisInput{
+		Identity: testIdentity(),
+		Changes: gitdiff.ChangeSet{
+			Repository: "codebyte-p/proofrail",
+			BaseSHA:    strings.Repeat("a", 40),
+			HeadSHA:    strings.Repeat("b", 40),
+			Files:      files,
+		},
+		Limits: limits,
+	})
 }
 
 func findingsFor(result run.AnalyzerResult, ruleID string) []finding.Finding {
@@ -410,6 +427,352 @@ func TestFindingsSurviveAnotherFileFailingToParse(t *testing.T) {
 	}
 	if len(findingsFor(result, "PFR-DEP-002")) != 1 {
 		t.Fatalf("evidence from the file that parsed was discarded; rules present: %v", ruleIDs(result))
+	}
+}
+
+// ----------------------------------------------------------------------------
+// Independent-review regression tests
+// ----------------------------------------------------------------------------
+
+// TestExecutableDependencyFileIsStillAnalyzed proves the executable bit does not
+// exempt a dependency file from analysis. A package manager reads package.json
+// regardless of its mode, so skipping 100755 would let `chmod +x` evade every
+// PFR-DEP rule. Review finding H1.
+func TestExecutableDependencyFileIsStillAnalyzed(t *testing.T) {
+	change := changed("package.json", nil, fixture(t, "malicious", "pfr-dep-002-git-dependency.json"))
+	change.Mode = gitdiff.ModeExecutable
+
+	result := analyze(t, change)
+
+	if result.Completion != run.CompletionComplete {
+		t.Fatalf("completion = %q, want complete (notes: %v)", result.Completion, result.CoverageNotes)
+	}
+	if len(findingsFor(result, "PFR-DEP-002")) != 1 {
+		t.Fatalf("an executable manifest evaded analysis; rules present: %v", ruleIDs(result))
+	}
+}
+
+// TestBuildRequirementsAreAnalyzed proves a build backend requirement is subject
+// to the same source rules as a runtime dependency.
+//
+// `build-system.requires` installs and executes at build time, so a mutable Git
+// requirement there is at least as dangerous as one in `dependencies`. The
+// parser read the field but the analyzer never ingested it, leaving it invisible
+// to every rule. Review finding H2.
+func TestBuildRequirementsAreAnalyzed(t *testing.T) {
+	const content = `[project]
+name = "example"
+version = "1.0.0"
+
+[build-system]
+requires = ["setuptools @ git+https://example.invalid/team/setuptools.git@main"]
+build-backend = "setuptools.build_meta"
+`
+
+	result := analyze(t, changed("pyproject.toml", nil, []byte(content)))
+
+	matches := findingsFor(result, "PFR-DEP-002")
+	if len(matches) != 1 {
+		t.Fatalf("a mutable build requirement was not reported; rules present: %v", ruleIDs(result))
+	}
+	if matches[0].DecisionHint != finding.DecisionBlock {
+		t.Errorf("decision = %q, want block", matches[0].DecisionHint)
+	}
+	if !strings.Contains(matches[0].Message, "setuptools") {
+		t.Errorf("message does not name the build requirement: %q", matches[0].Message)
+	}
+}
+
+// TestNPMGitShorthandIsNotTreatedAsRegistry proves npm's `owner/repo` shorthand
+// is classified as the Git dependency it is.
+//
+// npm resolves a bare `owner/repo` to GitHub. Falling through to the registry
+// branch classified it as a registry dependency, and PFR-DEP-002 skips registry
+// sources outright, so the shorthand produced no finding at all. Review finding
+// H4.
+func TestNPMGitShorthandIsNotTreatedAsRegistry(t *testing.T) {
+	cases := []struct {
+		name string
+		spec string
+	}{
+		{"bare shorthand", "example-org/internal-tool"},
+		{"shorthand with branch", "example-org/internal-tool#main"},
+		{"shorthand with commit", "example-org/internal-tool#0123456789abcdef0123456789abcdef01234567"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			content := `{"name":"example","dependencies":{"internal-tool":"` + tc.spec + `"}}`
+			result := analyze(t, changed("package.json", nil, []byte(content)))
+
+			matches := findingsFor(result, "PFR-DEP-002")
+			if len(matches) != 1 {
+				t.Fatalf("%q produced no PFR-DEP-002; rules present: %v", tc.spec, ruleIDs(result))
+			}
+			// A shorthand pinned to a full commit is reproducible, so it is
+			// reported for review rather than blocked.
+			want := finding.DecisionBlock
+			if strings.Contains(tc.spec, "#0123456789") {
+				want = finding.DecisionRequireReview
+			}
+			if matches[0].DecisionHint != want {
+				t.Errorf("decision = %q, want %q", matches[0].DecisionHint, want)
+			}
+		})
+	}
+}
+
+// TestManifestOnlyChangeIsAMismatch proves a dependency added without any
+// lockfile update is reported.
+//
+// The rule returned early whenever the change set carried no resolved packages,
+// which is exactly the shape of the most common mismatch: edit the manifest and
+// leave the lock alone. Review finding H5.
+func TestManifestOnlyChangeIsAMismatch(t *testing.T) {
+	result := analyze(t, changed("package.json",
+		fixture(t, "malicious", "pfr-dep-001-manifest-lock-mismatch.base.json"),
+		fixture(t, "malicious", "pfr-dep-001-manifest-lock-mismatch.head.json")))
+
+	matches := findingsFor(result, "PFR-DEP-001")
+	if len(matches) != 1 {
+		t.Fatalf("a manifest-only dependency addition evaded PFR-DEP-001; rules present: %v", ruleIDs(result))
+	}
+	if matches[0].DecisionHint != finding.DecisionBlock {
+		t.Errorf("decision = %q, want block", matches[0].DecisionHint)
+	}
+	if !strings.Contains(matches[0].Message, "new-helper") {
+		t.Errorf("message does not name the unresolved dependency: %q", matches[0].Message)
+	}
+}
+
+// TestDeletedLockIsAMismatch proves removing the lockfile is reported rather
+// than silently skipped as an unreadable file. Deleting the lock unbinds every
+// dependency at once. Review finding H5.
+func TestDeletedLockIsAMismatch(t *testing.T) {
+	result := analyze(t,
+		unchanged("package.json", fixture(t, "benign", "pfr-dep-001-in-sync.head.json")),
+		gitdiff.FileChange{
+			Path:        "package-lock.json",
+			Kind:        gitdiff.Deleted,
+			Mode:        gitdiff.ModeFile,
+			BaseContent: fixture(t, "benign", "pfr-dep-001-lock.json"),
+		},
+	)
+
+	matches := findingsFor(result, "PFR-DEP-001")
+	if len(matches) != 1 {
+		t.Fatalf("a deleted lockfile evaded PFR-DEP-001; rules present: %v", ruleIDs(result))
+	}
+	if matches[0].DecisionHint != finding.DecisionBlock {
+		t.Errorf("decision = %q, want block", matches[0].DecisionHint)
+	}
+}
+
+// TestExactPinDisagreeingWithLockIsAMismatch proves the rule compares the
+// resolved version against the declared one, not merely that the name appears.
+//
+// A manifest pinned to 1.3.0 against a lock resolving 9.9.9 is an inconsistent
+// resolved identity, which is what PFR-DEP-001 exists to catch. Checking only
+// name presence let that through. Review finding H6.
+func TestExactPinDisagreeingWithLockIsAMismatch(t *testing.T) {
+	const manifest = `{"name":"example","dependencies":{"left-pad":"1.3.0"}}`
+	const lock = `{
+  "name": "example",
+  "lockfileVersion": 3,
+  "packages": {
+    "node_modules/left-pad": {
+      "version": "9.9.9",
+      "resolved": "https://registry.npmjs.org/left-pad/-/left-pad-9.9.9.tgz",
+      "integrity": "sha512-left"
+    }
+  }
+}`
+
+	result := analyze(t,
+		changed("package.json", nil, []byte(manifest)),
+		changed("package-lock.json", nil, []byte(lock)),
+	)
+
+	matches := findingsFor(result, "PFR-DEP-001")
+	if len(matches) != 1 {
+		t.Fatalf("an exact pin disagreeing with the lock evaded PFR-DEP-001; rules present: %v", ruleIDs(result))
+	}
+	if !strings.Contains(matches[0].Message, "left-pad") {
+		t.Errorf("message does not name the package: %q", matches[0].Message)
+	}
+}
+
+// TestExactPinAgreeingWithLockIsClean guards the H6 fix against over-reach.
+func TestExactPinAgreeingWithLockIsClean(t *testing.T) {
+	const manifest = `{"name":"example","dependencies":{"left-pad":"1.3.0"}}`
+
+	result := analyze(t,
+		changed("package.json", nil, []byte(manifest)),
+		changed("package-lock.json", nil, fixture(t, "benign", "pfr-dep-001-lock.json")),
+	)
+
+	if matches := findingsFor(result, "PFR-DEP-001"); len(matches) != 0 {
+		t.Fatalf("PFR-DEP-001 fired on a pin that agrees with the lock: %+v", matches)
+	}
+}
+
+// TestDiagnosticsAndCoverageNotesAreRedacted proves the two result channels that
+// are not findings still go through redaction.
+//
+// finding.Finalize redacts messages, evidence, and limitations, but diagnostics
+// and coverage notes bypass it entirely while still reaching the console, logs,
+// and published reports. Both carry repository-derived key names. Review
+// mediums M1a and M1b.
+func TestDiagnosticsAndCoverageNotesAreRedacted(t *testing.T) {
+	const leaked = "ghp_0123456789abcdef0123456789abcdef0123"
+
+	t.Run("coverage note", func(t *testing.T) {
+		// An unmodeled top-level field is reported by name.
+		content := `{"name":"example","` + leaked + `":"value"}`
+		result := analyze(t, changed("package.json", nil, []byte(content)))
+
+		joined := strings.Join(result.CoverageNotes, "\n")
+		if joined == "" {
+			t.Fatal("expected a coverage note naming the unmodeled field")
+		}
+		if strings.Contains(joined, leaked) {
+			t.Errorf("a coverage note leaked a credential: %q", joined)
+		}
+	})
+
+	t.Run("diagnostic", func(t *testing.T) {
+		// A duplicate key is reported with the key in the locator.
+		content := `{"` + leaked + `":1,"` + leaked + `":2}`
+		result := analyze(t, changed("package.json", nil, []byte(content)))
+
+		if len(result.Diagnostics) == 0 {
+			t.Fatal("expected a duplicate-key diagnostic")
+		}
+		for _, d := range result.Diagnostics {
+			if strings.Contains(d.Path, leaked) || strings.Contains(d.Message, leaked) {
+				t.Errorf("a diagnostic leaked a credential: %+v", d)
+			}
+		}
+	})
+}
+
+// TestFindingBudgetIsEnforced proves exceeding the finding ceiling is a budget
+// failure rather than a silent truncation.
+//
+// docs/architecture.md caps a run at 5,000 findings and CLAUDE.md makes any
+// budget failure yield incomplete and exit code 2. Nothing read MaxFindings, so
+// a hostile manifest could emit an unbounded number. Review medium M3.
+func TestFindingBudgetIsEnforced(t *testing.T) {
+	var deps []string
+	for i := 0; i < 12; i++ {
+		deps = append(deps, `"tool-`+strconv.Itoa(i)+`":"git+https://example.invalid/t`+strconv.Itoa(i)+`.git#main"`)
+	}
+	content := `{"name":"example","dependencies":{` + strings.Join(deps, ",") + `}}`
+
+	limits := run.DefaultLimits()
+	limits.MaxFindings = 5
+
+	result := analyzeWithLimits(t, limits, changed("package.json", nil, []byte(content)))
+
+	if result.Completion != run.CompletionFailed {
+		t.Fatalf("completion = %q, want failed when the finding budget is exceeded", result.Completion)
+	}
+	if len(result.Findings) > limits.MaxFindings {
+		t.Errorf("returned %d findings, above the %d ceiling", len(result.Findings), limits.MaxFindings)
+	}
+	var budget bool
+	for _, d := range result.Diagnostics {
+		if strings.Contains(d.Code, "budget") {
+			budget = true
+		}
+	}
+	if !budget {
+		t.Errorf("no budget diagnostic explains the failure: %+v", result.Diagnostics)
+	}
+}
+
+// TestSameNameInDifferentEcosystemsDoesNotCollide proves records are keyed by
+// ecosystem as well as name.
+//
+// `requests` exists on both npm and PyPI. Keying the comparison maps by name
+// alone let a Python package already in the base revision mask a genuinely new
+// npm package of the same name, so the npm addition was never counted as added.
+// Review medium M4.
+func TestSameNameInDifferentEcosystemsDoesNotCollide(t *testing.T) {
+	const pyproject = `[project]
+name = "example"
+dependencies = ["requests>=2.31.0"]
+`
+	const npmBase = `{"name":"example","dependencies":{}}`
+	const npmHead = `{"name":"example","dependencies":{"requests":"^1.0.0"}}`
+
+	result := analyze(t,
+		unchanged("pyproject.toml", []byte(pyproject)),
+		changed("package.json", []byte(npmBase), []byte(npmHead)),
+	)
+
+	// Graph expansion counts declarations the head introduced. The npm
+	// `requests` is new to npm regardless of what PyPI package shares its name.
+	matches := findingsFor(result, "PFR-DEP-005")
+	if len(matches) != 1 {
+		t.Fatalf("the npm addition was masked by the Python package of the same name; rules present: %v", ruleIDs(result))
+	}
+	if !strings.Contains(matches[0].Message, "requests") {
+		t.Errorf("message does not name the added dependency: %q", matches[0].Message)
+	}
+}
+
+// TestPathDependencyEscapingTheRepositoryBlocks proves a local path that leaves
+// the repository is treated as outside it.
+//
+// docs/analyzers.md says PFR-DEP-002 blocks when a source is "mutable or
+// outside repository". Only Git and URL sources were tested for that, so a
+// `file:` specifier climbing out of the tree was routed to review. Review
+// medium M5.
+func TestPathDependencyEscapingTheRepositoryBlocks(t *testing.T) {
+	cases := []struct {
+		name string
+		spec string
+		want finding.Decision
+	}{
+		{"escaping parent path", "file:../../../shared/lib", finding.DecisionBlock},
+		{"absolute path", "file:/opt/vendor/lib", finding.DecisionBlock},
+		{"contained path", "file:./packages/lib", finding.DecisionRequireReview},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			content := `{"name":"example","dependencies":{"local-lib":"` + tc.spec + `"}}`
+			result := analyze(t, changed("package.json", nil, []byte(content)))
+
+			matches := findingsFor(result, "PFR-DEP-002")
+			if len(matches) != 1 {
+				t.Fatalf("expected one PFR-DEP-002 for %q, got %v", tc.spec, ruleIDs(result))
+			}
+			if matches[0].DecisionHint != tc.want {
+				t.Errorf("decision = %q, want %q", matches[0].DecisionHint, tc.want)
+			}
+		})
+	}
+}
+
+// TestUnparseableBaseFailsClosed proves a base revision that will not parse is a
+// failure rather than an empty baseline.
+//
+// An empty baseline makes PFR-DEP-004 treat every locked package as new and
+// skip it, so a corrupted base lock suppressed the rule entirely. That is
+// fail-open, and CLAUDE.md requires the fail-closed reading when a required
+// parser input cannot be read. Review medium M6.
+func TestUnparseableBaseFailsClosed(t *testing.T) {
+	result := analyze(t, changed("package-lock.json",
+		[]byte(`{"lockfileVersion":3,"packages":{"a":1,"a":2}}`),
+		fixture(t, "benign", "pfr-dep-004-source-unchanged.json")))
+
+	if result.Completion != run.CompletionFailed {
+		t.Fatalf("completion = %q, want failed when the base revision cannot be parsed", result.Completion)
+	}
+	if len(result.Diagnostics) == 0 {
+		t.Error("an unreadable base must explain itself with a diagnostic")
 	}
 }
 

@@ -155,7 +155,10 @@ func untrustedCheckout(job parser.Job) (parser.Step, parser.Scalar, bool) {
 
 func isCheckoutAction(uses string) bool {
 	name, _, ok := splitActionRef(uses)
-	return ok && name == "actions/checkout"
+	// GitHub resolves `uses:` case-insensitively, so `Actions/Checkout` runs
+	// the same Action. An exact comparison let a mixed-case spelling bypass
+	// PFR-WF-001 and PFR-WF-005 entirely.
+	return ok && strings.EqualFold(name, "actions/checkout")
 }
 
 func referencesUntrustedRef(value string) bool {

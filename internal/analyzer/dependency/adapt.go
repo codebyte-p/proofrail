@@ -39,9 +39,66 @@ func classifyNPMSpec(spec string) (SourceKind, bool) {
 		return SourceURL, false
 	case strings.HasPrefix(trimmed, "npm:"):
 		return SourceRegistry, isExactNPMVersion(strings.TrimPrefix(trimmed, "npm:"))
+	case isGitHubShorthand(trimmed):
+		// npm resolves a bare `owner/repo` to GitHub. Falling through to the
+		// registry branch classified it as a registry dependency, which
+		// PFR-DEP-002 skips outright, so the shorthand produced no finding.
+		return SourceGit, gitReferenceIsImmutable(trimmed)
 	default:
 		return SourceRegistry, isExactNPMVersion(trimmed)
 	}
+}
+
+// isGitHubShorthand reports whether spec is npm's `owner/repo` or
+// `owner/repo#ref` GitHub shorthand.
+//
+// A semver range never contains a slash, and every other source form is matched
+// by an explicit prefix before this check, so a slash at this point means the
+// shorthand.
+func isGitHubShorthand(spec string) bool {
+	repoPath, _, _ := strings.Cut(spec, "#")
+	owner, repo, found := strings.Cut(repoPath, "/")
+	if !found || owner == "" || repo == "" {
+		return false
+	}
+	return !strings.Contains(repo, "/")
+}
+
+// exactNPMVersion returns the single version a registry specifier pins to, or
+// "" when it names a range. It is what PFR-DEP-001 compares against the lock.
+func exactNPMVersion(spec string) string {
+	s := strings.TrimSpace(spec)
+	s = strings.TrimPrefix(s, "npm:")
+	// An aliased spec is `npm:<name>@<version>`; a plain one has no `@`.
+	if i := strings.LastIndex(s, "@"); i > 0 {
+		s = s[i+1:]
+	}
+	if isExactNPMVersion(s) {
+		return s
+	}
+	return ""
+}
+
+// exactPythonVersion returns the single version a PEP 508 specifier pins to
+// with `==`, or "" when it names a range, a direct reference, or a wildcard.
+func exactPythonVersion(spec string) string {
+	s := strings.TrimSpace(spec)
+	if strings.Contains(s, "@") {
+		return ""
+	}
+	idx := strings.Index(s, "==")
+	if idx < 0 {
+		return ""
+	}
+	rest := s[idx+len("=="):]
+	if i := strings.IndexAny(rest, ",; "); i >= 0 {
+		rest = rest[:i]
+	}
+	rest = strings.TrimSpace(rest)
+	if rest == "" || strings.Contains(rest, "*") {
+		return ""
+	}
+	return rest
 }
 
 // gitReferenceIsImmutable reports whether a Git specifier names a full commit
@@ -156,6 +213,51 @@ func classifyUVSource(git, url, path, branch, tag, rev string) (SourceKind, bool
 	default:
 		return SourceUnknown, false
 	}
+}
+
+// pathEscapesRepository reports whether a local path specifier resolves outside
+// the repository tree.
+//
+// The check is lexical and slash-based, matching how these specifiers are
+// written rather than how the host filesystem would resolve them, so it cannot
+// be changed by the platform the scan runs on.
+func pathEscapesRepository(spec string) bool {
+	s := strings.TrimSpace(spec)
+	for _, prefix := range []string{"file:", "link:"} {
+		s = strings.TrimPrefix(s, prefix)
+	}
+	if s == "" {
+		return false
+	}
+	s = strings.ReplaceAll(s, `\`, "/")
+
+	// An absolute path, or a Windows volume specifier, leaves the tree outright.
+	if strings.HasPrefix(s, "/") {
+		return true
+	}
+	if len(s) >= 2 && s[1] == ':' {
+		c := s[0]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+			return true
+		}
+	}
+
+	// Otherwise walk the segments: a `..` that no earlier segment cancels
+	// climbs above the repository root.
+	depth := 0
+	for _, segment := range strings.Split(s, "/") {
+		switch segment {
+		case "", ".":
+		case "..":
+			depth--
+			if depth < 0 {
+				return true
+			}
+		default:
+			depth++
+		}
+	}
+	return false
 }
 
 // isCommitHash reports whether s is a full 40-character lowercase hash, the

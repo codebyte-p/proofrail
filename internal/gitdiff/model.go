@@ -45,6 +45,19 @@ const (
 	ModeSubmodule  EntryMode = "submodule"
 )
 
+// ReadableAsContent reports whether an entry of this mode carries file bytes an
+// analyzer may parse.
+//
+// A regular file and an executable file differ only in a permission bit. The
+// tools that consume these files ignore that bit entirely: GitHub Actions runs
+// a workflow and npm reads a manifest whatever the mode, so treating mode
+// 100755 as unreadable would let `chmod +x` exempt a file from analysis. A
+// symlink's blob is a path and a submodule's is a commit id, so neither is
+// content this engine may follow.
+func (m EntryMode) ReadableAsContent() bool {
+	return m == ModeFile || m == ModeExecutable
+}
+
 // FileChange is one normalized changed path.
 //
 // Path and PreviousPath are normalized repository-relative paths. BaseContent

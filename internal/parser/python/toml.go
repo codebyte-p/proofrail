@@ -327,6 +327,18 @@ func (r *reader) parseKeyValue(current *table, currentPath string) bool {
 func (r *reader) parseKeyPath() ([]Scalar, bool) {
 	var segments []Scalar
 	for {
+		// The value depth bound does not reach key paths, and each dotted
+		// segment creates a nested table, so an unbounded path is unbounded
+		// work and unbounded allocation.
+		if len(segments) >= MaxDepth {
+			r.reject("depth_exceeded", "", "a key path nests deeper than the parser depth bound")
+			return nil, false
+		}
+		r.nodes++
+		if r.nodes > MaxNodes {
+			r.reject("node_budget_exceeded", "", "document contains more values than the parser budget allows")
+			return nil, false
+		}
 		r.skipInlineSpace()
 		seg, ok := r.parseKeySegment()
 		if !ok {

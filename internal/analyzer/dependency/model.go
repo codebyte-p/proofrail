@@ -44,7 +44,15 @@ type Position struct {
 	Column int
 }
 
+// buildRequirementKind marks a declaration that the build frontend installs in
+// an isolated environment rather than one the project lockfile resolves.
+const buildRequirementKind = "build-system.requires"
+
 // Declared is one dependency as the manifest declares it, before resolution.
+//
+// Pinned holds the single version the specifier names, or "" when it names a
+// range. Version 1 does not evaluate range satisfaction, so only an exact pin
+// can be compared against what the lockfile resolved.
 type Declared struct {
 	Ecosystem Ecosystem
 	Name      string
@@ -52,9 +60,19 @@ type Declared struct {
 	Kind      string
 	Source    SourceKind
 	Immutable bool
+	Pinned    string
 	Path      string
 	Pos       Position
 }
+
+// LockResolved reports whether a lockfile is expected to resolve this
+// declaration.
+//
+// A build requirement is installed by the build frontend into an isolated
+// environment that the project lock does not necessarily describe, so its
+// absence from the lock is not a mismatch. It remains subject to every source
+// and provenance rule.
+func (d Declared) LockResolved() bool { return d.Kind != buildRequirementKind }
 
 // Resolved is one dependency as the lockfile resolves it.
 //
@@ -83,18 +101,59 @@ type Script struct {
 	Pos       Position
 }
 
+// ecosystems is the fixed iteration order for per-ecosystem rules, so findings
+// are emitted in the same sequence on every run.
+var ecosystems = []Ecosystem{EcosystemNPM, EcosystemPython}
+
 // Snapshot is one side of the comparison: everything the analyzer learned about
 // a revision's dependency declarations and resolutions.
+//
+// The coverage maps record what the change set actually contained. PFR-DEP-001
+// needs them to tell "the lockfile resolved this" from "no lockfile was part of
+// this change", which are different facts with different decisions. They are
+// read by key only, never ranged over, so map ordering cannot reach output.
 type Snapshot struct {
 	Declared []Declared
 	Resolved []Resolved
 	Scripts  []Script
+
+	ManifestSeen map[Ecosystem]bool
+	LockSeen     map[Ecosystem]bool
+	LockDeleted  map[Ecosystem]bool
 }
+
+func (s *Snapshot) markManifest(eco Ecosystem) {
+	if s.ManifestSeen == nil {
+		s.ManifestSeen = make(map[Ecosystem]bool, len(ecosystems))
+	}
+	s.ManifestSeen[eco] = true
+}
+
+func (s *Snapshot) markLock(eco Ecosystem) {
+	if s.LockSeen == nil {
+		s.LockSeen = make(map[Ecosystem]bool, len(ecosystems))
+	}
+	s.LockSeen[eco] = true
+}
+
+func (s *Snapshot) markLockDeleted(eco Ecosystem) {
+	if s.LockDeleted == nil {
+		s.LockDeleted = make(map[Ecosystem]bool, len(ecosystems))
+	}
+	s.LockDeleted[eco] = true
+}
+
+// recordKey namespaces a record by its ecosystem.
+//
+// A package name is only unique within its own registry: `requests` exists on
+// both npm and PyPI. Keying by name alone let a record from one ecosystem mask
+// a different package of the same name in another.
+func recordKey(eco Ecosystem, name string) string { return string(eco) + "\x00" + name }
 
 func (s Snapshot) declaredNames() map[string]Declared {
 	out := make(map[string]Declared, len(s.Declared))
 	for _, d := range s.Declared {
-		out[d.Name] = d
+		out[recordKey(d.Ecosystem, d.Name)] = d
 	}
 	return out
 }
@@ -102,7 +161,7 @@ func (s Snapshot) declaredNames() map[string]Declared {
 func (s Snapshot) resolvedByName() map[string]Resolved {
 	out := make(map[string]Resolved, len(s.Resolved))
 	for _, r := range s.Resolved {
-		out[r.Name] = r
+		out[recordKey(r.Ecosystem, r.Name)] = r
 	}
 	return out
 }
@@ -110,7 +169,7 @@ func (s Snapshot) resolvedByName() map[string]Resolved {
 func (s Snapshot) scriptsByName() map[string]Script {
 	out := make(map[string]Script, len(s.Scripts))
 	for _, sc := range s.Scripts {
-		out[sc.Name] = sc
+		out[recordKey(sc.Ecosystem, sc.Name)] = sc
 	}
 	return out
 }

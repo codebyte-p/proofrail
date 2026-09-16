@@ -101,8 +101,8 @@ func (a analyzer) Analyze(ctx context.Context, in run.AnalysisInput) run.Analyze
 			}
 			continue
 		}
-		if file.Mode != gitdiff.ModeFile {
-			notes = append(notes, "dependency file "+file.Path+" is not a regular file and was not analyzed")
+		if !file.Mode.ReadableAsContent() {
+			notes = append(notes, "dependency file "+file.Path+" is not readable as file content and was not analyzed")
 			continue
 		}
 		if file.CoverageNote != "" {
@@ -110,6 +110,13 @@ func (a analyzer) Analyze(ctx context.Context, in run.AnalysisInput) run.Analyze
 			continue
 		}
 		if file.Kind == gitdiff.Deleted {
+			// Removing a lockfile unbinds every dependency at once, so the
+			// deletion is recorded as a fact PFR-DEP-001 reads rather than
+			// skipped as an unreadable file.
+			if role == roleNPMLock || role == rolePythonLock {
+				head.markLockDeleted(ecosystemOf(role))
+				analyzed++
+			}
 			notes = append(notes, "dependency file "+file.Path+" was deleted and was not analyzed")
 			continue
 		}
@@ -119,14 +126,13 @@ func (a analyzer) Analyze(ctx context.Context, in run.AnalysisInput) run.Analyze
 		if headOK {
 			analyzed++
 		}
-		// A base that will not parse is coverage, not a failure: the head
-		// revision is what governs the pull request, and an empty baseline is
-		// the conservative direction for every rule that compares the two.
+		// A base that will not parse is a failure, not coverage. An empty
+		// baseline makes every locked package look new, and PFR-DEP-004 skips
+		// a package it has no baseline for, so a corrupted base revision would
+		// suppress the rule rather than trip it. That is fail-open, and the
+		// base is a required input for every comparison this analyzer makes.
 		if len(file.BaseContent) > 0 {
-			if !ing.into(&base, file.BaseContent, &notes, nil) {
-				notes = append(notes, "base revision of "+file.Path+
-					" could not be parsed; the comparison used an empty baseline")
-			}
+			ing.into(&base, file.BaseContent, &notes, &diags)
 		}
 	}
 
@@ -144,6 +150,18 @@ func (a analyzer) Analyze(ctx context.Context, in run.AnalysisInput) run.Analyze
 	}
 	finding.Sort(result.Findings)
 
+	// docs/architecture.md caps a run's findings and CLAUDE.md makes any budget
+	// failure yield incomplete and exit code 2, so the ceiling is enforced as a
+	// failure rather than as a silent truncation.
+	if limit := in.Limits.MaxFindings; limit > 0 && len(result.Findings) > limit {
+		result.Findings = result.Findings[:limit]
+		diags = append(diags, run.Diagnostic{
+			Code:    ID + ".finding_budget_exceeded",
+			Path:    ID,
+			Message: "the analyzer produced more findings than the configured ceiling allows",
+		})
+	}
+
 	switch {
 	case len(diags) > 0:
 		result.Completion = run.CompletionFailed
@@ -153,9 +171,32 @@ func (a analyzer) Analyze(ctx context.Context, in run.AnalysisInput) run.Analyze
 		result.Completion = run.CompletionComplete
 	}
 
-	result.CoverageNotes = dedupe(notes)
-	result.Diagnostics = diags
+	result.CoverageNotes = redactNotes(dedupe(notes))
+	result.Diagnostics = redactDiagnostics(diags)
 	return result
+}
+
+// redactNotes and redactDiagnostics close the gap that finding.Finalize does not
+// cover.
+//
+// Finalize redacts a finding's message, evidence, and limitations, but
+// diagnostics and coverage notes reach the console, logs, and published reports
+// without passing through it, and both carry repository-derived key names and
+// paths. A credential written as a manifest key would otherwise ride out in a
+// locator.
+func redactNotes(items []string) []string {
+	for i := range items {
+		items[i] = finding.Redact(items[i])
+	}
+	return items
+}
+
+func redactDiagnostics(diags []run.Diagnostic) []run.Diagnostic {
+	for i := range diags {
+		diags[i].Path = finding.Redact(diags[i].Path)
+		diags[i].Message = finding.Redact(diags[i].Message)
+	}
+	return diags
 }
 
 // ingestion reads one file into one side of the comparison.
@@ -165,9 +206,9 @@ type ingestion struct {
 	role   fileRole
 }
 
-// into parses content and appends its records to snap. Diagnostics are recorded
-// only when diags is non-nil, which is how a base-revision failure is demoted
-// to a coverage note.
+// into parses content and appends its records to snap, reporting whether the
+// content was read. A parse failure appends diagnostics, which drive the
+// analyzer to failed completion.
 func (ing ingestion) into(snap *Snapshot, content []byte, notes *[]string, diags *[]run.Diagnostic) bool {
 	if len(content) == 0 {
 		return false
@@ -183,6 +224,7 @@ func (ing ingestion) into(snap *Snapshot, content []byte, notes *[]string, diags
 			return false
 		}
 		*notes = append(*notes, manifest.CoverageNotes...)
+		snap.markManifest(EcosystemNPM)
 		ing.appendNPMManifest(snap, manifest)
 
 	case roleNPMLock:
@@ -194,6 +236,7 @@ func (ing ingestion) into(snap *Snapshot, content []byte, notes *[]string, diags
 			return false
 		}
 		*notes = append(*notes, lock.CoverageNotes...)
+		snap.markLock(EcosystemNPM)
 		ing.appendNPMLock(snap, lock)
 
 	case rolePythonProject:
@@ -205,6 +248,7 @@ func (ing ingestion) into(snap *Snapshot, content []byte, notes *[]string, diags
 			return false
 		}
 		*notes = append(*notes, project.CoverageNotes...)
+		snap.markManifest(EcosystemPython)
 		ing.appendPythonProject(snap, project)
 
 	case rolePythonLock:
@@ -216,9 +260,20 @@ func (ing ingestion) into(snap *Snapshot, content []byte, notes *[]string, diags
 			return false
 		}
 		*notes = append(*notes, lock.CoverageNotes...)
+		snap.markLock(EcosystemPython)
 		ing.appendPythonLock(snap, lock)
 	}
 	return true
+}
+
+// ecosystemOf maps a file role to the ecosystem it belongs to.
+func ecosystemOf(role fileRole) Ecosystem {
+	switch role {
+	case roleNPMManifest, roleNPMLock:
+		return EcosystemNPM
+	default:
+		return EcosystemPython
+	}
 }
 
 func (ing ingestion) appendNPMManifest(snap *Snapshot, m npm.Manifest) {
@@ -231,6 +286,7 @@ func (ing ingestion) appendNPMManifest(snap *Snapshot, m npm.Manifest) {
 			Kind:      req.Kind,
 			Source:    kind,
 			Immutable: immutable,
+			Pinned:    exactNPMVersion(req.Spec.Value),
 			Path:      ing.path,
 			Pos:       Position{Line: req.Name.Pos.Line, Column: req.Name.Pos.Column},
 		})
@@ -281,8 +337,26 @@ func (ing ingestion) appendPythonProject(snap *Snapshot, p python.Project) {
 			Kind:      req.Kind,
 			Source:    kind,
 			Immutable: immutable,
+			Pinned:    exactPythonVersion(req.Spec.Value),
 			Path:      ing.path,
 			Pos:       Position{Line: req.Spec.Pos.Line, Column: req.Spec.Pos.Column},
+		})
+	}
+	// A build requirement installs and executes at build time, so it is subject
+	// to the same source and provenance rules as a runtime dependency. It was
+	// parsed but never ingested, leaving it invisible to every rule.
+	for _, req := range p.BuildRequires {
+		kind, immutable := classifyPythonSpec(req.Value)
+		snap.Declared = append(snap.Declared, Declared{
+			Ecosystem: EcosystemPython,
+			Name:      pythonRequirementName(req.Value),
+			Spec:      req.Value,
+			Kind:      buildRequirementKind,
+			Source:    kind,
+			Immutable: immutable,
+			Pinned:    exactPythonVersion(req.Value),
+			Path:      ing.path,
+			Pos:       Position{Line: req.Pos.Line, Column: req.Pos.Column},
 		})
 	}
 	// A `[tool.uv.sources]` entry redirects a dependency away from the default

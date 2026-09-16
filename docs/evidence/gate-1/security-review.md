@@ -126,3 +126,47 @@ further 60 seconds after the fix with no new failures.
 - Plan amendments 1, 2, and 3 are proposed and unaccepted; see the Gate 1 plan.
 - `go test -race` has not run on the development workstation (no C toolchain).
   CI runs it on `ubuntu-latest`; a run link must be recorded before promotion.
+
+## PR #1 independent review — 2026-09-16
+
+Verdict: **REQUEST_CHANGES**. Six high and eight medium findings, all fixed on
+`feat/gate1-workflow` with a named regression test per finding. Every fix was
+red-green verified: the test failed against the reviewed commit for the reason
+the finding states, then passed.
+
+### High
+
+| # | Finding | Resolution |
+|---|---|---|
+| H1 | Mode 100755 caused active workflows and dependency files to be skipped | `EntryMode.ReadableAsContent` accepts file and executable; symlink and submodule still skipped |
+| H2 | Python `build-system.requires` parsed but excluded from every rule | Ingested as `build-system.requires` declarations, subject to the source rules |
+| H3 | Mixed-case `Actions/Checkout` bypassed PFR-WF-001 and PFR-WF-005 | Case-insensitive comparison, matching how GitHub resolves `uses:` |
+| H4 | npm `owner/repo` Git shorthand misclassified as a registry dependency | Classified as Git; PFR-DEP-002 had been skipping registry sources outright |
+| H5 | Manifest-only changes and lock deletion evaded PFR-DEP-001 | Lock presence and deletion recorded per ecosystem rather than inferred from resolution count |
+| H6 | PFR-DEP-001 checked name presence but not version consistency | Exact pins compared against the resolved version; range satisfaction remains out of scope and is recorded as a limitation |
+
+### Medium
+
+| # | Finding | Resolution |
+|---|---|---|
+| M1a | Coverage notes bypassed redaction | Notes pass through `finding.Redact` |
+| M1b | Diagnostic paths and messages bypassed redaction | Diagnostics pass through `finding.Redact` |
+| M2 | TOML dotted key paths had no depth or node bound | Bounded by `MaxDepth` and the node budget |
+| M3 | `Limits.MaxFindings` was never enforced | Exceeding it is a budget failure yielding `failed` completion |
+| M4 | Records keyed by name collided across ecosystems | Keys namespaced by ecosystem; name similarity compares within one registry |
+| M5 | PFR-DEP-002 tested only Git and URL for "outside repository" | Local paths that escape the tree, or are absolute, now block |
+| M6 | Base-revision parse failure fell back to an empty baseline | Treated as a required-input failure in both analyzers |
+| M7 | Only the first uv artifact hash formed the resolved identity | Identity spans the sdist and every wheel, bounded at 2 KiB |
+
+### Notes for the re-review
+
+- M6 tightens behavior: a repository whose base revision holds an unparseable
+  manifest or lock now yields `incomplete` rather than analyzing against an
+  empty baseline. This is the fail-closed reading `CLAUDE.md` requires, and it
+  reverses a Task 4 decision that had recorded the same condition as coverage.
+- H5's manifest-only case fires whenever a change adds or alters a dependency
+  with no lockfile in the change set. Offline analysis cannot distinguish a
+  project that keeps no lockfile from one whose lockfile was not updated, so
+  the finding records both readings in its limitations.
+- Severity and confidence for PFR-DEP-001..006 remain the implementer's choice
+  and still want an owner ruling, as the PFR-WF table received in Amendment 6.

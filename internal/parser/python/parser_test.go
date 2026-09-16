@@ -300,6 +300,64 @@ func TestParseRejectsEmptyKey(t *testing.T) {
 	}
 }
 
+// TestParseRejectsUnboundedDottedKeyPath proves a dotted key path is bounded.
+//
+// The value depth bound did not cover key paths, so `[a.a.a...]` with thousands
+// of segments allocated a nested table per segment with nothing stopping it.
+// Review medium M2.
+func TestParseRejectsUnboundedDottedKeyPath(t *testing.T) {
+	segments := make([]string, 4000)
+	for i := range segments {
+		segments[i] = "a"
+	}
+	content := "[" + strings.Join(segments, ".") + "]\nkey = \"value\"\n"
+
+	project, diags := python.ParseProject("pyproject.toml", []byte(content), 1<<20)
+	if !hasCode(diags, "python.depth_exceeded") {
+		t.Fatalf("expected python.depth_exceeded, got %v", codes(diags))
+	}
+	if len(project.Requirements) != 0 {
+		t.Error("a rejected document must not yield requirements")
+	}
+}
+
+// TestParseLockCoversEveryArtifactHash proves the resolved identity spans every
+// declared artifact, not just the first.
+//
+// uv.lock lists one wheel per platform. Taking only the first meant swapping any
+// later wheel left the identity unchanged, so PFR-DEP-004 could not see the
+// substitution. Review medium M7.
+func TestParseLockCoversEveryArtifactHash(t *testing.T) {
+	build := func(secondHash string) string {
+		return "version = 1\n\n[[package]]\nname = \"requests\"\nversion = \"2.31.0\"\n" +
+			"source = { registry = \"https://pypi.org/simple\" }\n\n" +
+			"[[package.wheels]]\nhash = \"sha256:aaaa\"\n\n" +
+			"[[package.wheels]]\nhash = \"" + secondHash + "\"\n"
+	}
+
+	first, diags := python.ParseLock("uv.lock", []byte(build("sha256:bbbb")), 10<<20)
+	if len(diags) != 0 {
+		t.Fatalf("expected a clean parse, got %v", codes(diags))
+	}
+	second, diags := python.ParseLock("uv.lock", []byte(build("sha256:cccc")), 10<<20)
+	if len(diags) != 0 {
+		t.Fatalf("expected a clean parse, got %v", codes(diags))
+	}
+
+	a, ok := first.Package("requests")
+	if !ok {
+		t.Fatal("requests missing from the first lock")
+	}
+	b, _ := second.Package("requests")
+
+	if a.Hash.Value == b.Hash.Value {
+		t.Fatalf("substituting the second wheel left the identity unchanged: %q", a.Hash.Value)
+	}
+	if !strings.Contains(a.Hash.Value, "aaaa") || !strings.Contains(a.Hash.Value, "bbbb") {
+		t.Errorf("the identity does not cover every declared wheel: %q", a.Hash.Value)
+	}
+}
+
 // TestParseLockRecordsUnsupportedVersion proves an unreadable lock format is a
 // diagnostic rather than a silently empty dependency set, which would look
 // identical to a project with no dependencies.

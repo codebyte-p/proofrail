@@ -421,6 +421,75 @@ func TestAnalyzerResultCarriesNoOperationalTiming(t *testing.T) {
 	}
 }
 
+// TestExecutableWorkflowIsStillAnalyzed proves the executable bit does not
+// exempt a workflow from analysis.
+//
+// GitHub runs a workflow regardless of its file mode, so skipping mode 100755
+// would let an attacker evade every PFR-WF rule with `chmod +x`. Only entries
+// that cannot be read as content -- symlinks and submodules -- are skipped.
+// Review finding H1.
+func TestExecutableWorkflowIsStillAnalyzed(t *testing.T) {
+	change := addedWorkflow(t, "malicious", "pfr-wf-001-privileged-untrusted-checkout.yml")
+	change.Mode = gitdiff.ModeExecutable
+
+	result := analyze(t, change)
+
+	if result.Completion != run.CompletionComplete {
+		t.Fatalf("completion = %q, want complete (notes: %v)", result.Completion, result.CoverageNotes)
+	}
+	if len(findingsFor(result, "PFR-WF-001")) != 1 {
+		t.Fatalf("an executable workflow evaded analysis; rules present: %v", ruleIDs(result))
+	}
+}
+
+// TestNonRegularEntriesAreStillSkipped keeps the H1 fix from over-reaching: a
+// symlink or submodule carries no readable workflow content and must remain a
+// coverage note rather than an analyzed file.
+func TestNonRegularEntriesAreStillSkipped(t *testing.T) {
+	for _, mode := range []gitdiff.EntryMode{gitdiff.ModeSymlink, gitdiff.ModeSubmodule} {
+		t.Run(string(mode), func(t *testing.T) {
+			change := addedWorkflow(t, "malicious", "pfr-wf-001-privileged-untrusted-checkout.yml")
+			change.Mode = mode
+
+			result := analyze(t, change)
+			if len(result.Findings) != 0 {
+				t.Errorf("a %s must not be analyzed, got %v", mode, ruleIDs(result))
+			}
+			if len(result.CoverageNotes) == 0 {
+				t.Errorf("a skipped %s must appear in the coverage notes", mode)
+			}
+		})
+	}
+}
+
+// TestCheckoutActionMatchIsCaseInsensitive proves the checkout detector is not
+// defeated by capitalization.
+//
+// GitHub resolves `uses:` case-insensitively, so `Actions/Checkout` runs the
+// same Action as `actions/checkout`. An exact comparison let a mixed-case
+// spelling bypass PFR-WF-001 and PFR-WF-005 entirely. Review finding H3.
+func TestCheckoutActionMatchIsCaseInsensitive(t *testing.T) {
+	for _, spelling := range []string{"Actions/Checkout", "ACTIONS/CHECKOUT", "actions/Checkout"} {
+		t.Run(spelling, func(t *testing.T) {
+			content := "name: pr-preview\non: pull_request_target\njobs:\n  preview:\n    runs-on: ubuntu-latest\n    steps:\n" +
+				"      - uses: " + spelling + "@3d3c42e5aac5ba805825da76410c181273ba90b1\n" +
+				"        with:\n          ref: ${{ github.event.pull_request.head.sha }}\n" +
+				"      - run: npm install && npm run build\n"
+
+			result := analyze(t, gitdiff.FileChange{
+				Path:        ".github/workflows/preview.yml",
+				Kind:        gitdiff.Added,
+				Mode:        gitdiff.ModeFile,
+				HeadContent: []byte(content),
+			})
+
+			if len(findingsFor(result, "PFR-WF-001")) != 1 {
+				t.Fatalf("%s bypassed PFR-WF-001; rules present: %v", spelling, ruleIDs(result))
+			}
+		})
+	}
+}
+
 // TestAnalyzerIsDeterministic proves two runs over identical input produce
 // byte-identical findings in identical order, which canonical output requires.
 func TestAnalyzerIsDeterministic(t *testing.T) {

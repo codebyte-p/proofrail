@@ -1,6 +1,10 @@
 package python
 
-import "github.com/codebyte-p/proofrail/internal/run"
+import (
+	"strings"
+
+	"github.com/codebyte-p/proofrail/internal/run"
+)
 
 // supportedLockfileVersions are the `uv.lock` formats whose resolved identity
 // this parser models. Reading an unmodeled version would yield an empty package
@@ -227,31 +231,57 @@ func (r *reader) decodeLockPackage(t *table) (LockedPackage, bool) {
 		pkg.URL = source.table.str("url")
 		pkg.Path = source.table.str("path")
 	}
-	pkg.Hash = r.firstArtifactHash(t)
+	pkg.Hash = r.artifactIdentity(t)
 	return pkg, true
 }
 
-// firstArtifactHash returns the first declared artifact digest for a package,
-// preferring the source distribution and falling back to the first wheel.
-func (r *reader) firstArtifactHash(t *table) Scalar {
+// maxArtifactHashBytes bounds the combined identity so a package declaring a
+// very large number of wheels cannot grow the record without limit.
+const maxArtifactHashBytes = 2048
+
+// artifactIdentity returns every declared artifact digest for a package, joined
+// in document order.
+//
+// A uv.lock package lists one wheel per platform. Taking only the first digest
+// meant substituting any later wheel left the identity unchanged, so
+// PFR-DEP-004 could not see the swap. The position reported is that of the
+// first digest, which is where a reader should look.
+func (r *reader) artifactIdentity(t *table) Scalar {
+	var (
+		parts []string
+		pos   Position
+		size  int
+	)
+	add := func(h Scalar) {
+		if !h.Present() || h.Value == "" {
+			return
+		}
+		if pos.Line == 0 {
+			pos = h.Pos
+		}
+		if size+len(h.Value) > maxArtifactHashBytes {
+			return
+		}
+		size += len(h.Value)
+		parts = append(parts, h.Value)
+	}
+
 	if sdist, _, ok := t.get("sdist"); ok && sdist.kind == vTable {
-		if h := sdist.table.str("hash"); h.Present() {
-			return h
+		add(sdist.table.str("hash"))
+	}
+	if wheels, _, ok := t.get("wheels"); ok && wheels.kind == vArray {
+		for _, wheel := range wheels.array {
+			if wheel.kind != vTable {
+				continue
+			}
+			add(wheel.table.str("hash"))
 		}
 	}
-	wheels, _, ok := t.get("wheels")
-	if !ok || wheels.kind != vArray {
+
+	if len(parts) == 0 {
 		return Scalar{}
 	}
-	for _, wheel := range wheels.array {
-		if wheel.kind != vTable {
-			continue
-		}
-		if h := wheel.table.str("hash"); h.Present() {
-			return h
-		}
-	}
-	return Scalar{}
+	return Scalar{Value: strings.Join(parts, " "), Pos: pos}
 }
 
 // stringList reads a named array of strings, recording any non-string element

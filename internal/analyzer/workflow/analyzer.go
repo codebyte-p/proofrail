@@ -68,8 +68,8 @@ func (a analyzer) Analyze(ctx context.Context, in run.AnalysisInput) run.Analyze
 		if !isWorkflowPath(file.Path) {
 			continue
 		}
-		if file.Mode != gitdiff.ModeFile {
-			notes = append(notes, "workflow "+file.Path+" is not a regular file and was not analyzed")
+		if !file.Mode.ReadableAsContent() {
+			notes = append(notes, "workflow "+file.Path+" is not readable as file content and was not analyzed")
 			continue
 		}
 		if file.CoverageNote != "" {
@@ -91,9 +91,9 @@ func (a analyzer) Analyze(ctx context.Context, in run.AnalysisInput) run.Analyze
 		analyzed++
 		notes = append(notes, head.CoverageNotes...)
 
-		base, baseNote := parseBase(file, in.Limits.MaxWorkflowFileBytes)
-		if baseNote != "" {
-			notes = append(notes, baseNote)
+		base, baseDiags := parseBase(file, in.Limits.MaxWorkflowFileBytes)
+		if len(baseDiags) > 0 {
+			diags = append(diags, baseDiags...)
 		}
 
 		candidates = append(candidates, evaluate(head, base)...)
@@ -116,6 +116,18 @@ func (a analyzer) Analyze(ctx context.Context, in run.AnalysisInput) run.Analyze
 	}
 	finding.Sort(result.Findings)
 
+	// docs/architecture.md caps a run's findings and CLAUDE.md makes any budget
+	// failure yield incomplete and exit code 2, so the ceiling is enforced as a
+	// failure rather than as a silent truncation.
+	if limit := in.Limits.MaxFindings; limit > 0 && len(result.Findings) > limit {
+		result.Findings = result.Findings[:limit]
+		diags = append(diags, run.Diagnostic{
+			Code:    ID + ".finding_budget_exceeded",
+			Path:    ID,
+			Message: "the analyzer produced more findings than the configured ceiling allows",
+		})
+	}
+
 	switch {
 	case len(diags) > 0:
 		// Failing closed is about coverage, not about evidence. Findings from
@@ -130,27 +142,51 @@ func (a analyzer) Analyze(ctx context.Context, in run.AnalysisInput) run.Analyze
 		result.Completion = run.CompletionComplete
 	}
 
-	result.CoverageNotes = dedupe(notes)
-	result.Diagnostics = diags
+	result.CoverageNotes = redactNotes(dedupe(notes))
+	result.Diagnostics = redactDiagnostics(diags)
 	return result
+}
+
+// redactNotes and redactDiagnostics close the gap that finding.Finalize does not
+// cover.
+//
+// Finalize redacts a finding's message, evidence, and limitations, but
+// diagnostics and coverage notes reach the console, logs, and published reports
+// without passing through it, and both carry repository-derived key names and
+// paths. A credential written as a manifest key would otherwise ride out in a
+// locator.
+func redactNotes(items []string) []string {
+	for i := range items {
+		items[i] = finding.Redact(items[i])
+	}
+	return items
+}
+
+func redactDiagnostics(diags []run.Diagnostic) []run.Diagnostic {
+	for i := range diags {
+		diags[i].Path = finding.Redact(diags[i].Path)
+		diags[i].Message = finding.Redact(diags[i].Message)
+	}
+	return diags
 }
 
 // parseBase reads the base revision of a changed workflow so rules that depend
 // on "newly introduced" can compare against it.
 //
-// A base that will not parse is not a failure: the head revision is what governs
-// the pull request. The comparison falls back to an empty baseline, which is the
-// conservative direction, and the substitution is recorded as coverage.
-func parseBase(file gitdiff.FileChange, maxBytes int64) (parser.Document, string) {
+// A base that will not parse is a failure rather than an empty baseline.
+// PFR-WF-002 judges permission widening against the base, and an empty baseline
+// would make an unchanged `write-all` look newly introduced while a corrupted
+// base could equally mask a real widening. The base is a required input, so an
+// unreadable one drives the run to incomplete.
+func parseBase(file gitdiff.FileChange, maxBytes int64) (parser.Document, []run.Diagnostic) {
 	if len(file.BaseContent) == 0 {
-		return parser.Document{}, ""
+		return parser.Document{}, nil
 	}
 	base, diags := parser.Parse(file.Path, file.BaseContent, maxBytes)
 	if len(diags) > 0 {
-		return parser.Document{}, "base revision of " + file.Path +
-			" could not be parsed; permission widening was judged against an empty baseline"
+		return parser.Document{}, diags
 	}
-	return base, ""
+	return base, nil
 }
 
 // isWorkflowPath reports whether p is a file GitHub Actions would actually run.
