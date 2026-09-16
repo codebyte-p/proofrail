@@ -1,6 +1,6 @@
 # ADR 0001: Restricted Declarative Policy and Waiver Model
 
-- **Status:** Proposed for independent review
+- **Status:** Accepted for Gate 1 implementation
 - **Date:** 2026-09-16
 - **Decision owners:** Repository owner, with independent Codex and Claude review
 
