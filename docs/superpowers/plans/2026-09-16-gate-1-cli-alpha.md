@@ -158,7 +158,7 @@ the independent reviewer and the repository owner accept it.
 
 ### Amendment 5: operational timing lives outside the canonical result
 
-- **Status:** Proposed 2026-09-16 during the Task 4 revision. Awaiting independent review and owner acceptance.
+- **Status:** **Concept approved by the repository owner on 2026-09-16. Contract wording NOT approved.** The Task 4 change below is approved and shipped. The Task 10 delivery mechanism is unsettled and is recorded as an open question at the end of this amendment. **Task 10 may not start until that question is closed.**
 - **Conflict.** Task 1 gave `AnalyzerResult` a `DurationNanos int64` field
   serialized as `duration_ns`, and Task 4 filled it with `time.Since(start)`.
   `CanonicalRunResult` embeds `[]AnalyzerResult`, so a wall-clock reading became
@@ -188,6 +188,41 @@ the independent reviewer and the repository owner accept it.
   fails closed today depends on the removed field. No status, decision, exit
   code, or ordering rule changes. The `Limits` recorded in the canonical result
   still state the bounds the run was produced under.
+
+#### Open question: how Task 10 delivers telemetry (blocks Task 10)
+
+The phrase "returned alongside `CanonicalRunResult`" is not implementable as
+written, and it collides with two pinned statements elsewhere in this plan.
+Both must be settled before Task 10 starts.
+
+1. **The `Scanner` signature returns one value.** The contract block pins
+   `type Scanner interface { Scan(context.Context, ScanRequest) CanonicalRunResult }`.
+   A single return value cannot carry telemetry alongside the result, so
+   Amendment 5 silently requires changing a pinned contract without saying so.
+2. **Task 10 Step 1 still requires duration in the ledger.** It reads "the
+   ledger records duration/budget/failure without secrets". The ledger is
+   `AnalyzerResult`, whose duration field Amendment 5 deletes. The step text and
+   the amendment cannot both stand.
+
+Candidate resolutions for (1), for owner decision:
+
+- **A (recommended).** Widen the contract to
+  `Scan(context.Context, ScanRequest) (CanonicalRunResult, Telemetry)`. The two
+  values are distinct types, so no reporter can reach telemetry through the
+  canonical result, and `ExitCode(CanonicalRunResult) int` is unaffected. Cost:
+  one pinned signature changes, which is what this question exists to authorize.
+- **B.** Pass a telemetry sink in `ScanRequest` and keep `Scan` as pinned.
+  **Not recommended:** a sink is a callback, and `CLAUDE.md` forbids adding
+  callbacks. Choosing B would need that invariant revisited first.
+- **C.** Return a wrapper struct holding both values. Equivalent to A in effect
+  but changes the return type rather than adding to it, so every later reference
+  to `CanonicalRunResult` as the return of `Scan` would need rewording.
+
+Proposed resolution for (2): reword Task 10 Step 1 to "the ledger records
+budget and failure without secrets, and telemetry records duration". This keeps
+the fault-matrix obligation intact while moving only the duration clause.
+
+Neither resolution is applied yet. This subsection is the reconciliation item.
 
 ### Amendment 6: PFR-WF default classification is owner-set, and critical is reserved
 

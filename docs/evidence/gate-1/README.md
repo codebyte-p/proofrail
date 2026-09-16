@@ -74,8 +74,8 @@ while any of them is unreviewed.
 | 2 | `AnalyzerResult` gains its `Findings` field in Task 10 rather than Task 1. | **accepted 2026-09-16 as historical context only**; superseded by Amendment 4 on when `Findings` appears and by Amendment 5 on the `duration` field it describes |
 | 3 | `internal/gitdiff` defines its own narrow `Limits` instead of importing `run.Limits`, because `internal/run` must import `internal/gitdiff` for `AnalysisInput.Changes`. | **accepted 2026-09-16** |
 | 4 | `AnalyzerResult.Findings` arrives in Task 4 rather than Task 10, because the PFR-WF analyzer test is the first test that requires the field. | **accepted 2026-09-16** |
-| 5 | Operational timing is telemetry: `AnalyzerResult.DurationNanos` is deleted, analyzers read no clock, and Task 10's orchestrator collects durations in a `run.Telemetry` value outside `CanonicalRunResult`. | proposed, awaiting review |
-| 6 | The owner set the PFR-WF default severity and confidence table, normative in `docs/analyzers.md`, and reserved `critical` for evidence proving exposure of write-capable or equivalently critical authority. | **set by the owner 2026-09-16** |
+| 5 | Operational timing is telemetry: `AnalyzerResult.DurationNanos` is deleted, analyzers read no clock, and the orchestrator collects durations outside `CanonicalRunResult`. | **concept accepted 2026-09-16; contract wording not accepted.** The Task 4 change is shipped. The Task 10 delivery mechanism conflicts with the pinned single-value `Scanner.Scan` signature and with Task 10 Step 1's "ledger records duration" clause. **Blocks Task 10**; see the open question in the plan. |
+| 6 | The owner set the PFR-WF default severity and confidence table, normative in `docs/analyzers.md`, and reserved `critical` for evidence proving exposure of write-capable or equivalently critical authority. | **approved 2026-09-16** |
 
 ## Dependency additions
 
