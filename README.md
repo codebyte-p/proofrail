@@ -1,6 +1,6 @@
 # ProofRail
 
-ProofRail is an evidence-backed software assurance platform for GitHub pull requests. Its goal is to help teams verify security-sensitive code and dependency changes—including changes produced by coding agents—before they reach production.
+ProofRail is an evidence-backed software assurance platform for GitHub pull requests. Its goal is to help teams verify security-sensitive code and dependency changes before they reach production, regardless of whether a human or an automated coding system authored them.
 
 ## Status
 
@@ -12,6 +12,7 @@ ProofRail is in its architecture and threat-modeling phase. The first implementa
 - AI may explain and correlate findings, but it may not invent evidence or silently merge changes.
 - Every finding must identify its source, affected artifact, severity, and remediation path.
 - Security-sensitive changes require independent review.
+- ProofRail evaluates observable changes and supplied provenance; it does not infer whether code was written by AI.
 - Provider safety rules and repository policy cannot be overridden by agent instructions.
 
 ## Planned progression
@@ -22,5 +23,13 @@ ProofRail is in its architecture and threat-modeling phase. The first implementa
 4. Add high-signal analyzers and policy-as-code.
 5. Add a production control plane and GitHub App.
 
-See [GOVERNANCE.md](GOVERNANCE.md) for decision authority and [AI_MAINTAINERS.md](AI_MAINTAINERS.md) for the Codex–Claude collaboration protocol.
+## Design documentation
 
+- [Product design](docs/superpowers/specs/2026-09-16-proofrail-design.md)
+- [Architecture and data flow](docs/architecture.md)
+- [Threat model](docs/threat-model.md)
+- [Analyzer contracts](docs/analyzers.md)
+- [Validation and promotion gates](docs/validation-gates.md)
+- [Restricted policy model](docs/decisions/0001-restricted-policy-model.md)
+
+See [GOVERNANCE.md](GOVERNANCE.md) for decision authority and [AI_MAINTAINERS.md](AI_MAINTAINERS.md) for the Codex–Claude collaboration protocol.
