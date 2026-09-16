@@ -73,11 +73,61 @@ type Renderer interface { Format() string; Render(run.CanonicalRunResult) ([]byt
 func WriteAtomic(path string, content []byte, maxBytes int64) error
 ```
 
+## Plan amendments
+
+Amendments are recorded here when implementation proves a planned structure
+unworkable. Each one states the conflict, the change, and the invariants it
+preserves. An amendment is proposed by the implementer and is not settled until
+the independent reviewer and the repository owner accept it.
+
+### Amendment 1: ordered finding enums live in `internal/finding`
+
+- **Status:** Proposed 2026-09-16 during Task 1. Awaiting independent review and owner acceptance.
+- **Conflict.** Task 1 assigns `Decision` to `internal/run/model.go`, and the
+  Task 3 signature `type Finding struct { ... DecisionHint Decision ... }` uses
+  the same identifier unqualified inside package `finding`. Task 10 then requires
+  `internal/run` to orchestrate `[]finding.Finding`. Defining the ordered enums in
+  `internal/run` forces `finding` to import `run` while `run` must import
+  `finding`, which Go rejects as an import cycle.
+- **Change.** `Severity`, `Confidence`, and `Decision` are defined in
+  `internal/finding`, which imports only the standard library and is the leaf of
+  the Gate 1 dependency graph. `internal/run` re-exports each of them as a type
+  alias with its constants, so `run.Decision`, `run.DecisionBlock`,
+  `run.Severity`, and `run.Confidence` remain valid spellings for every later
+  task and for `ExitCode(CanonicalRunResult{Status, Decision})`. The single
+  dependency direction becomes `run -> finding`.
+- **Files added to Task 1.** `internal/finding/enum.go`, `internal/finding/enum_test.go`.
+- **Invariants preserved.** No symbol named in the plan is removed or renamed;
+  aliases are identical types, not conversions. Severity order stays
+  `note < low < medium < high < critical`, confidence stays `low < medium < high`,
+  and decision restrictiveness stays `block > require_review > warn > observe > pass`.
+  No limit, error semantic, exit code, or package-boundary rule in
+  `CLAUDE.md`, `docs/architecture.md`, or ADR 0001 changes.
+
+### Amendment 2: `AnalyzerResult` gains its findings field in Task 10
+
+- **Status:** Proposed 2026-09-16 during Task 1. Awaiting independent review and owner acceptance.
+- **Conflict.** The specification's `AnalyzerResult` carries findings, but
+  `finding.Finding` does not exist until Task 3, and the required development
+  loop forbids writing production code ahead of the test that demands it.
+- **Change.** Task 1 defines `AnalyzerResult` with analyzer identity, version,
+  completion status, coverage notes, duration, budget usage, and redacted failure
+  diagnostics. The `Findings []finding.Finding` field is added in Task 10, driven
+  by the orchestration test that first requires it.
+- **Invariants preserved.** The completion ledger and the rule that a required
+  analyzer returning `failed` yields `incomplete` are unchanged; only the moment
+  the field appears moves.
+
+---
+
 ## Task 1: Toolchain, module, CI, and terminal contracts
 
 **Files:**
 - Create: `go.mod`
+- Create: `.gitattributes`
 - Create: `.github/workflows/ci.yml`
+- Create: `internal/finding/enum.go` (Amendment 1)
+- Create: `internal/finding/enum_test.go` (Amendment 1)
 - Create: `internal/run/model.go`
 - Create: `internal/run/model_test.go`
 - Create: `internal/run/exit.go`
@@ -87,7 +137,7 @@ func WriteAtomic(path string, content []byte, maxBytes int64) error
 **Interfaces:**
 - Produces `RunIdentity`, `Status`, `Decision`, `Diagnostic`, `AnalyzerResult`, `CanonicalRunResult`, `Limits`, and `ExitCode` used by all later tasks.
 
-- [ ] **Step 1: Pin the module and toolchain configuration**
+- [x] **Step 1: Pin the module and toolchain configuration**
 
 Create `go.mod` with:
 
@@ -101,7 +151,7 @@ toolchain go1.27.1
 
 Create CI with `permissions: contents: read`, `persist-credentials: false`, checkout SHA `3d3c42e5aac5ba805825da76410c181273ba90b1`, setup-go SHA `b7ad1dad31e06c5925ef5d2fc7ad053ef454303e`, `go-version: 1.27.1`, and commands `go test ./...`, `go vet ./...`, `go test -race ./...`, and `go test ./... -run TestCanonical -count=100`.
 
-- [ ] **Step 2: Write failing terminal-contract tests**
+- [x] **Step 2: Write failing terminal-contract tests**
 
 ```go
 func TestExitCode(t *testing.T) {
@@ -117,17 +167,17 @@ func TestExitCode(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: Run the focused tests and verify RED**
+- [x] **Step 3: Run the focused tests and verify RED**
 
 Run: `go test ./internal/run -run 'TestExitCode|TestRunIdentityValidation' -v`
 
 Expected: compile failure because the types and `ExitCode` do not exist.
 
-- [ ] **Step 4: Implement minimal immutable contracts and exit mapping**
+- [x] **Step 4: Implement minimal immutable contracts and exit mapping**
 
 Use string-backed closed enums, JSON field tags in the canonical order, `time.Time` normalized with `UTC()`, and `Limits` values copied from the architecture. `ExitCode` must check `StatusIncomplete` before decision.
 
-- [ ] **Step 5: Verify GREEN and commit**
+- [x] **Step 5: Verify GREEN and commit**
 
 Run: `go test ./internal/run -v && go test ./... && go vet ./...`
 
