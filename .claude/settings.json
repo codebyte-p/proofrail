@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "extraKnownMarketplaces": {
+    "trailofbits": {
+      "source": {
+        "source": "github",
+        "repo": "trailofbits/skills"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "superpowers@claude-plugins-official": true,
+    "static-analysis@trailofbits": true,
+    "supply-chain-risk-auditor@trailofbits": true,
+    "agentic-actions-auditor@trailofbits": true,
+    "insecure-defaults@trailofbits": true,
+    "variant-analysis@trailofbits": true,
+    "fp-check@trailofbits": true,
+    "differential-review@trailofbits": true,
+    "sharp-edges@trailofbits": true
+  }
+}
