@@ -54,7 +54,7 @@ flowchart LR
 ProofRail binds every run to an immutable tuple:
 
 ```text
-repository identity + base commit SHA + head commit SHA + policy digest + engine version
+repository identity + base commit SHA + head commit SHA + policy digest + waiver digest + engine version + evaluated_at
 ```
 
 The evaluator loads `.proofrail/policy.yml` from the base revision by default. A pull request cannot relax the policy used to judge itself. A proposed policy change is analyzed as data and takes effect only after it reaches the default branch. Local users may supply an explicit policy path, and the report records that path and digest.
@@ -87,7 +87,7 @@ limitations[]
 fingerprint
 ```
 
-Excerpts are length-bounded and redacted. Secret values are never included. Fingerprints derive from the rule, normalized location, and stable evidence—not from mutable prose.
+Excerpts are capped at 512 UTF-8 bytes and escaped for their destination. Values from recognized secret contexts—including GitHub `secrets` expressions, private-key blocks, authorization headers, and keys whose normalized name contains `token`, `secret`, `password`, `passwd`, `private_key`, or `api_key`—are replaced before serialization. Built-in detectors additionally redact GitHub token prefixes, AWS access-key identifiers, PEM private-key headers, and compact JWT-shaped values. Detection is defense in depth: analyzers should prefer structural evidence and digests over literal secret-like values. Fingerprints derive from the rule, normalized location, and stable redacted evidence—not from mutable prose or secret values.
 
 Every run produces exactly one status:
 
@@ -148,19 +148,32 @@ Required controls before a private beta:
 
 ## Overrides and waivers
 
-An override is not a command-line `--force` switch. A waiver is a declarative record stored on the protected default branch with:
+An override is not a command-line `--force` switch. A waiver is an exact-fingerprint record stored on the protected default branch with:
 
-- finding fingerprint or rule and bounded path scope;
+- one exact finding fingerprint and 1–20 exact repository-relative paths;
 - justification;
 - approving actor or team;
 - creation and expiry timestamps;
 - associated issue or risk-acceptance record.
 
-A pull request cannot approve a waiver that it introduces. ProofRail reports every applied waiver and its digest. Expired, malformed, or broadened waivers are ignored and produce a finding.
+A pull request cannot approve a waiver that it introduces. ProofRail reports every applied or rejected waiver and its digest. Expired or malformed waivers are ignored and produce a finding. Wildcard, rule-only, prefix, and global waivers are invalid. Changes that expand an existing waiver must use a new identifier, are classified as security-control changes, and require owner review before they can reach the base branch. Exact schema, containment, expiry, identifier-reuse, and audit behavior are defined in [ADR 0001](decisions/0001-restricted-policy-model.md).
 
 ## Resource limits and safe failure
 
-All parsers and analyzers receive limits for file count, changed bytes, individual file size, YAML alias expansion, recursion depth, and wall-clock time. Limit exhaustion produces `incomplete`, identifies the affected analyzer, and preserves other results. Outputs are written atomically after schema validation. An interrupted run cannot leave a valid-looking partial report.
+Version 1 applies these hard defaults:
+
+- 5,000 changed files;
+- 50 MiB of changed-file content in aggregate;
+- 2 MiB per workflow YAML file;
+- 10 MiB per lockfile;
+- 1 MiB per manifest and 128 KiB per policy or waiver document;
+- YAML aliases, anchors, merge keys, and custom tags rejected rather than expanded;
+- 64 levels of parser/container nesting outside the stricter policy-expression depth of 8;
+- 30 seconds per analyzer and 120 seconds for the complete run;
+- 5,000 canonical findings and 5,000 SARIF results per run;
+- 50 MiB total canonical serialized output.
+
+Limits are part of the run configuration and integrity digest. A future schema version may lower them without weakening security; increasing them requires benchmark and threat-model review. Limit exhaustion produces `incomplete`, identifies the affected analyzer or stage, and preserves other results. Result overflow is never silently truncated into a valid pass. Outputs are written atomically after schema validation so an interrupted run cannot leave a valid-looking partial report.
 
 ## Explicit non-goals for version 1
 

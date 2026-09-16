@@ -122,7 +122,9 @@ repository identity
 base commit SHA
 head commit SHA
 policy digest
+waiver digest
 engine version
+evaluated_at UTC timestamp
 ```
 
 ### `AnalysisInput`
@@ -187,7 +189,7 @@ Each rule documents evidence, default decision, false positives, false negatives
 
 Policy is restricted declarative YAML. It uses an allow-listed field registry, bounded operators, fixed nesting and operation limits, and most-restrictive-decision precedence. Unknown syntax fails closed as `incomplete`. It cannot read files, use environment variables, call functions, access a network, or load code.
 
-Waivers are separate base-branch records with scope, justification, approver, issue, and expiry. A pull request cannot create the waiver that approves itself. No waiver can suppress incomplete analysis.
+Waivers are separate base-branch records restricted to one exact finding fingerprint and exact paths, with justification, approver attribution, issue, creation time, and a maximum 30-day lifetime. A pull request cannot create the waiver that approves itself. No waiver can suppress incomplete analysis. Scope changes require a new identifier and owner-reviewed base-branch change, as specified in ADR 0001.
 
 ## Error handling
 

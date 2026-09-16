@@ -11,7 +11,7 @@ Metrics:
 - **Must-detect rate:** proportion of curated blocking scenarios producing the expected rule and decision.
 - **False-block rate:** benign cases incorrectly receiving `block` or `require_review` beyond the documented policy expectation.
 - **Completion rate:** runs that produce a schema-valid terminal result without internal error.
-- **Determinism:** byte-equivalent canonical results for the same bound inputs and engine version.
+- **Determinism:** byte-equivalent canonical results for the same bound inputs, engine version, limits, and injected `evaluated_at` timestamp.
 - **P95 duration:** wall-clock duration at the defined corpus size.
 - **Publication integrity:** GitHub presentation matches canonical decision, revision, and fingerprints.
 
@@ -41,9 +41,12 @@ Promotion criteria:
 - False-block rate at or below 5% on the initial benign corpus, with every remaining case documented.
 - P95 duration below 60 seconds for 5,000 changed lines and 100 changed supported files on the reference GitHub-hosted runner.
 - No network request during analysis, verified by an isolated test environment.
+- Policy evaluation satisfies ADR 0001 operator, termination, adversarial-policy, fixed-clock, waiver-containment, fuzz, and fault-injection obligations.
 - Independent security review of parser, path, policy, redaction, and atomic-output boundaries.
 
 Pilot: local shadow-mode use on ProofRail and at least two public repositories whose maintainers authorize analysis. Findings are not merge-blocking.
+
+The CLI alpha permits a false-block rate up to 5% because results remain local or shadow-only and every error can be studied without stopping another team's merge. The Action threshold falls to 2% before blocking adoption because an erroneous CI decision imposes a direct coordination and delivery cost on contributors.
 
 Rollback: pin the last passing CLI release; revoke the affected release checksum and publish a visible advisory when decision integrity is affected.
 

@@ -183,7 +183,7 @@ The canonical JSON finding remains authoritative. SARIF maps:
 - explanation and limitations to Markdown-safe `message.text`;
 - analyzer identity and version to `tool.driver`.
 
-SARIF cannot fully represent the run-level `incomplete` status or ProofRail's review and waiver semantics. Those remain in canonical JSON and the job summary. Result counts are capped well below GitHub's documented ingestion limits; overflow makes the analyzer incomplete instead of silently truncating high-priority findings.
+SARIF cannot fully represent the run-level `incomplete` status or ProofRail's review and waiver semantics. Those remain in canonical JSON and the job summary. ProofRail caps canonical findings and SARIF results at 5,000 per run; overflow makes the run incomplete instead of silently truncating high-priority findings.
 
 ## Deferred analyzers
 
