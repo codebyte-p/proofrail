@@ -258,25 +258,25 @@ Commit: `feat: bind scans to safe immutable git changes`
 - Consumes normalized repository paths.
 - Produces validated, redacted, deterministically ordered `Finding` values.
 
-- [ ] **Step 1: Write failing validation and fingerprint tests**
+- [x] **Step 1: Write failing validation and fingerprint tests**
 
 Create one finding with unsorted locations and evidence. Assert `Finalize` sorts inputs, truncates excerpts to 512 UTF-8 bytes without breaking encoding, and returns the same `sha256:<64 lowercase hex>` fingerprint in 100 repetitions. Assert changes to rule ID, normalized location, or stable redacted evidence change the fingerprint; message wording and slice insertion order do not.
 
-- [ ] **Step 2: Write failing redaction tests**
+- [x] **Step 2: Write failing redaction tests**
 
 Cover keys `token`, `secret`, `password`, `passwd`, `private_key`, and `api_key`; GitHub token prefixes; AWS access-key shapes; PEM headers; JWT shapes; terminal escape bytes; and Markdown control characters. Assert public evidence contains `[REDACTED:<kind>]`, never the matched value.
 
-- [ ] **Step 3: Run and verify RED**
+- [x] **Step 3: Run and verify RED**
 
 Run: `go test ./internal/finding -run 'TestFinalize|TestRedact' -v`
 
 Expected: compile failure because `Finalize` and `Redact` are missing.
 
-- [ ] **Step 4: Implement minimal validation, redaction, and hashing**
+- [x] **Step 4: Implement minimal validation, redaction, and hashing**
 
 Fingerprint the length-prefixed UTF-8 sequence of rule ID, analyzer ID, each sorted path/start/end location, each evidence kind, and the SHA-256 digest of its redacted excerpt. Reject unknown enum values and findings without rule, analyzer, message, location, or evidence kind.
 
-- [ ] **Step 5: Add fuzz properties and commit**
+- [x] **Step 5: Add fuzz properties and commit**
 
 Fuzz arbitrary UTF-8/bytes through redaction and finalization; assert no panic, valid UTF-8 output, 512-byte excerpt bound, and no reproduction of seeded secrets.
 

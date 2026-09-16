@@ -51,7 +51,7 @@ A task counts as done only when its focused tests, `go test ./...`, and
 |---|---|---|---|
 | 1 | Toolchain, module, CI, terminal contracts | `feat/gate1-contracts` | done |
 | 2 | Safe paths and immutable Git revision binding | `feat/gate1-gitdiff` | done |
-| 3 | Findings, redaction, ordering, fingerprints | — | not started |
+| 3 | Findings, redaction, ordering, fingerprints | `feat/gate1-findings` | done |
 | 4 | Bounded workflow parser and PFR-WF analyzer | — | not started |
 | 5 | npm/Python parsing and PFR-DEP analyzer | — | not started |
 | 6 | PFR-DIFF security-sensitive classifier | — | not started |
