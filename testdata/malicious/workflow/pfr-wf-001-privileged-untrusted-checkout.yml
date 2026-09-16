@@ -1,0 +1,13 @@
+# must_detect: PFR-WF-001
+# A pull_request_target workflow checks out the fork's head and then runs a
+# repository-controlled command with the privileged base-repository token.
+name: pr-preview
+on: pull_request_target
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - run: npm install && npm run build

@@ -52,7 +52,7 @@ A task counts as done only when its focused tests, `go test ./...`, and
 | 1 | Toolchain, module, CI, terminal contracts | `feat/gate1-contracts` | done |
 | 2 | Safe paths and immutable Git revision binding | `feat/gate1-gitdiff` | done |
 | 3 | Findings, redaction, ordering, fingerprints | `feat/gate1-findings` | done |
-| 4 | Bounded workflow parser and PFR-WF analyzer | — | not started |
+| 4 | Bounded workflow parser and PFR-WF analyzer | `feat/gate1-workflow` | done |
 | 5 | npm/Python parsing and PFR-DEP analyzer | — | not started |
 | 6 | PFR-DIFF security-sensitive classifier | — | not started |
 | 7 | Embedded schemas and restricted policy parsing | — | not started |
@@ -65,8 +65,8 @@ A task counts as done only when its focused tests, `go test ./...`, and
 
 ## Plan amendments awaiting review
 
-Both amendments are recorded in full in the Gate 1 plan and are **proposed, not
-accepted**. Gate 1 cannot close while either is unreviewed.
+All four amendments are recorded in full in the Gate 1 plan and are **proposed,
+not accepted**. Gate 1 cannot close while any of them is unreviewed.
 
 - **Amendment 1** — the ordered `Severity`, `Confidence`, and `Decision` enums are
   defined in `internal/finding` and re-exported from `internal/run` as type
@@ -74,7 +74,28 @@ accepted**. Gate 1 cannot close while either is unreviewed.
   Task 10 orchestrates `[]finding.Finding`.
 - **Amendment 2** — `AnalyzerResult` gains its `Findings` field in Task 10 rather
   than Task 1, because `finding.Finding` does not exist until Task 3 and the
-  development loop forbids production code ahead of its test.
+  development loop forbids production code ahead of its test. Superseded on its
+  timing by Amendment 4.
+- **Amendment 3** — `internal/gitdiff` defines its own narrow `Limits` instead of
+  importing `run.Limits`, because `internal/run` must import `internal/gitdiff`
+  for `AnalysisInput.Changes`. Proposed during Task 2 and recorded here during
+  Task 4.
+- **Amendment 4** — `AnalyzerResult.Findings` arrives in Task 4 rather than Task
+  10, because the PFR-WF analyzer test is the first test that requires the field
+  and `finding.Finding` already exists once Task 3 is complete.
+
+## Dependency additions
+
+Every added module needs a stated purpose, exact version, license check, a
+checksum in `go.sum`, a vulnerability scan, and owner-visible review, per
+`CLAUDE.md`. Review by the repository owner is **outstanding** for each row.
+
+| Module | Version | Purpose | License | Checksum | Vulnerability scan | Owner review |
+|---|---|---|---|---|---|---|
+| `go.yaml.in/yaml/v3` | `v3.0.5` | Restricted YAML node decoding for `internal/parser/workflow`. Used only through `yaml.Node`, so aliases, anchors, merge keys, and non-core tags are rejected by ProofRail before any typed decoding. | MIT and Apache-2.0 (dual, per upstream `LICENSE` and `NOTICE`) | `go.sum` records `h1:N6y/pJk8buWs9NY5ERU2HSMfm+IuD/OtfdAnq6kESPw=` | `govulncheck ./...` on 2026-09-16 scanned 2 modules plus the go1.27.1 standard library: no vulnerabilities found | pending |
+
+The module is on the approved initial list in `CLAUDE.md`, so this row records
+the evidence rather than requesting a new approval.
 
 ## Known environment limitations
 

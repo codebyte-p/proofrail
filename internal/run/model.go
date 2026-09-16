@@ -9,10 +9,12 @@
 package run
 
 import (
+	"context"
 	"strings"
 	"time"
 
 	"github.com/codebyte-p/proofrail/internal/finding"
+	"github.com/codebyte-p/proofrail/internal/gitdiff"
 )
 
 // SchemaVersion identifies the canonical run-result contract. It is part of the
@@ -296,17 +298,47 @@ func DefaultLimits() Limits {
 	}
 }
 
+// AnalysisInput is the immutable, already-bounded view one analyzer receives.
+//
+// It is a value, not a handle: an analyzer gets normalized records and never a
+// path, a file descriptor, a process, or a network client. Policy and Waivers
+// are the raw bytes loaded from the bound base revision, so an analyzer can
+// read declared configuration without any analyzer gaining the authority to
+// evaluate policy, which belongs to internal/policy alone.
+type AnalysisInput struct {
+	Identity RunIdentity
+	Changes  gitdiff.ChangeSet
+	Policy   []byte
+	Waivers  []byte
+	Limits   Limits
+}
+
+// Analyzer is one compiled analysis family. Implementations are registered at
+// build time; nothing is downloaded, loaded, or resolved at runtime.
+//
+// Analyze returns a result rather than an error: an analyzer that cannot finish
+// reports Completion failed with redacted diagnostics, and the orchestrator
+// turns that into an incomplete run. Returning an error would invite a caller to
+// ignore it and treat missing analysis as a pass.
+type Analyzer interface {
+	ID() string
+	Analyze(context.Context, AnalysisInput) AnalyzerResult
+}
+
 // AnalyzerResult is one analyzer's entry in the completion ledger.
 //
-// Findings are added in Task 10, when the orchestration test first requires
-// them; see Amendment 2 in the Gate 1 plan.
+// Findings arrive here already validated, redacted, and fingerprinted by
+// finding.Finalize. They remain untrusted until the orchestrator re-validates
+// them, as docs/analyzers.md requires; see Amendment 4 in the Gate 1 plan for
+// why the field lands in Task 4 rather than Task 10.
 type AnalyzerResult struct {
-	AnalyzerID      string       `json:"analyzer_id"`
-	AnalyzerVersion string       `json:"analyzer_version"`
-	Completion      Completion   `json:"completion"`
-	CoverageNotes   []string     `json:"coverage_notes,omitempty"`
-	DurationNanos   int64        `json:"duration_ns"`
-	Diagnostics     []Diagnostic `json:"diagnostics,omitempty"`
+	AnalyzerID      string            `json:"analyzer_id"`
+	AnalyzerVersion string            `json:"analyzer_version"`
+	Completion      Completion        `json:"completion"`
+	Findings        []finding.Finding `json:"findings,omitempty"`
+	CoverageNotes   []string          `json:"coverage_notes,omitempty"`
+	DurationNanos   int64             `json:"duration_ns"`
+	Diagnostics     []Diagnostic      `json:"diagnostics,omitempty"`
 }
 
 // CanonicalRunResult is the authoritative output of a scan. Console, Markdown,

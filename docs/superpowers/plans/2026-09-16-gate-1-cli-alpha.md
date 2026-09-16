@@ -136,6 +136,26 @@ the independent reviewer and the repository owner accept it.
   and 50 MiB of aggregate changed content. Exceeding either still yields an
   `incomplete`-class failure.
 
+### Amendment 4: `AnalyzerResult.Findings` arrives in Task 4, not Task 10
+
+- **Status:** Proposed 2026-09-16 during Task 4. Awaiting independent review and owner acceptance. Supersedes the timing clause of Amendment 2.
+- **Conflict.** Amendment 2 deferred `Findings []finding.Finding` to Task 10 on
+  the grounds that `finding.Finding` did not yet exist and the required
+  development loop forbids production code ahead of its test. Task 3 is now
+  complete, so `finding.Finding` exists, and Task 4 is the task that first
+  builds an analyzer. The PFR-WF analyzer test is therefore the first test that
+  requires the field; waiting until Task 10 would mean Task 4 either invents a
+  parallel return channel for findings or ships an analyzer that cannot report.
+- **Change.** `AnalyzerResult` gains `Findings []finding.Finding` in Task 4,
+  driven by the PFR-WF analyzer test. Task 10 consumes the field rather than
+  introducing it. Amendment 2's reasoning is unchanged and its conclusion is
+  simply reached one task earlier than predicted.
+- **Invariants preserved.** No field is renamed or removed and the ordering of
+  the enums is untouched. The completion ledger is unchanged, and a required
+  analyzer returning `failed` still yields `incomplete` and exit code `2`.
+  Findings placed in the field are still untrusted until `finding.Finalize` has
+  validated, redacted, ordered, and fingerprinted them.
+
 ---
 
 ## Task 1: Toolchain, module, CI, and terminal contracts
@@ -299,29 +319,29 @@ Commit: `feat: add redaction-safe canonical findings`
 - Parser: `Parse(path string, content []byte, maxBytes int64) (workflow.Document, []run.Diagnostic)`.
 - Analyzer: `New() run.Analyzer`, ID `github-workflow`, implementing PFR-WF-001 through PFR-WF-006 exactly as specified.
 
-- [ ] **Step 1: Write parser rejection tests**
+- [x] **Step 1: Write parser rejection tests**
 
 Assert rejection of documents above 2 MiB, more than one YAML document, aliases, anchors, merge keys, custom tags, duplicate keys, non-string keys, and nesting above 64. Assert source locations are retained for scalar nodes and input bytes are never executed or interpolated.
 
-- [ ] **Step 2: Run parser tests and verify RED**
+- [x] **Step 2: Run parser tests and verify RED**
 
 Run: `go test ./internal/parser/workflow -run TestParse -v`
 
 Expected: compile failure because `Parse` is missing.
 
-- [ ] **Step 3: Implement the restricted syntax-tree pass**
+- [x] **Step 3: Implement the restricted syntax-tree pass**
 
 Pin `go.yaml.in/yaml/v3 v3.0.5`. Decode exactly one `yaml.Node`, walk it iteratively, reject forbidden node properties before typed decoding, count nesting and nodes, then decode only allow-listed workflow fields needed by the six rules. Unknown workflow fields are preserved as coverage notes, not executed.
 
-- [ ] **Step 4: Write one failing rule test per PFR-WF rule**
+- [x] **Step 4: Write one failing rule test per PFR-WF rule**
 
 For each PFR-WF-001 through PFR-WF-006, include one minimal malicious fixture, one compensating/benign fixture, expected severity/confidence/decision hint, exact source path, evidence kind, and limitation text. PFR-WF-001, 004, and 005 fixtures are labeled `must_detect`.
 
-- [ ] **Step 5: Implement rules without cross-rule weakening**
+- [x] **Step 5: Implement rules without cross-rule weakening**
 
 Return candidate findings independently; do not let a later rule suppress an earlier one. When static reachability cannot be proven, preserve the specified confidence and limitation instead of claiming safety.
 
-- [ ] **Step 6: Fuzz, verify, and commit**
+- [x] **Step 6: Fuzz, verify, and commit**
 
 Seed at least 100 workflow mutations, then run: `go test ./internal/parser/workflow ./internal/analyzer/workflow -v`, `go test ./internal/parser/workflow -fuzz=FuzzParse -fuzztime=60s`, and `go test ./...`.
 

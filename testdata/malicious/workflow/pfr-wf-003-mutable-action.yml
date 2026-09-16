@@ -1,0 +1,9 @@
+# PFR-WF-003: a third-party Action is pinned to a mutable tag.
+name: lint
+on: push
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: some-vendor/lint-action@v1
+      - run: make lint

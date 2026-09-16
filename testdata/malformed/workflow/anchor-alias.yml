@@ -1,0 +1,12 @@
+# Rejected by the parser: anchors and aliases are outside the restricted grammar.
+name: ci
+on: push
+defaults: &base
+  run:
+    shell: bash
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults: *base
+    steps:
+      - run: make test
