@@ -41,6 +41,27 @@ Detect pull-request changes that create common GitHub Actions privilege and supp
 | `PFR-WF-005` secrets exposed to untrusted execution | Secret-bearing job or environment combined with PR-controlled code execution | Block |
 | `PFR-WF-006` persistence on self-hosted runner | Untrusted PR job targets `self-hosted` without an approved ephemeral-runner policy | Require review |
 
+### Default classification
+
+Owner-approved on 2026-09-16. These are the defaults each rule emits; policy may
+route them differently, but an analyzer may not exceed them.
+
+| Rule | Severity | Confidence |
+|---|---|---|
+| `PFR-WF-001` | high | high |
+| `PFR-WF-002` | high | medium |
+| `PFR-WF-003` | medium | high |
+| `PFR-WF-004` | high | high when directly reachable from an untrusted trigger, medium when reachability is uncertain |
+| `PFR-WF-005` | high | high |
+| `PFR-WF-006` | high | medium |
+
+**Critical severity is reserved.** A rule may claim `critical` only on evidence
+proving exposure of write-capable or equivalently critical authority. Observing
+that a hazardous pattern is present is not such proof, so no version 1 PFR-WF
+rule emits `critical`. Confidence never raises severity: per the threat model it
+exists so policy can route weak evidence to review, not so strong evidence can
+escalate impact.
+
 ### Example
 
 ```yaml

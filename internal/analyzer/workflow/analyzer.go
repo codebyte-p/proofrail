@@ -15,7 +15,6 @@ package workflow
 import (
 	"context"
 	"strings"
-	"time"
 
 	"github.com/codebyte-p/proofrail/internal/finding"
 	"github.com/codebyte-p/proofrail/internal/gitdiff"
@@ -48,7 +47,6 @@ func (analyzer) ID() string { return ID }
 // failed with redacted diagnostics, which the orchestrator turns into an
 // incomplete run and exit code 2.
 func (a analyzer) Analyze(ctx context.Context, in run.AnalysisInput) run.AnalyzerResult {
-	start := time.Now()
 	result := run.AnalyzerResult{AnalyzerID: ID, AnalyzerVersion: Version}
 
 	var (
@@ -120,10 +118,12 @@ func (a analyzer) Analyze(ctx context.Context, in run.AnalysisInput) run.Analyze
 
 	switch {
 	case len(diags) > 0:
+		// Failing closed is about coverage, not about evidence. Findings from
+		// workflows that were fully analyzed are retained and reported; the
+		// failed completion is what drives the run to incomplete and exit code
+		// 2. Discarding them would tell a reviewer less than the engine knows
+		// while doing nothing to make the run safer.
 		result.Completion = run.CompletionFailed
-		// A failed analyzer reports no findings: partial results from an
-		// incomplete pass would read as coverage that never happened.
-		result.Findings = nil
 	case analyzed == 0:
 		result.Completion = run.CompletionNotApplicable
 	default:
@@ -132,7 +132,6 @@ func (a analyzer) Analyze(ctx context.Context, in run.AnalysisInput) run.Analyze
 
 	result.CoverageNotes = dedupe(notes)
 	result.Diagnostics = diags
-	result.DurationNanos = time.Since(start).Nanoseconds()
 	return result
 }
 

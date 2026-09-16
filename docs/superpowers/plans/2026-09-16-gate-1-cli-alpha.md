@@ -82,7 +82,7 @@ the independent reviewer and the repository owner accept it.
 
 ### Amendment 1: ordered finding enums live in `internal/finding`
 
-- **Status:** Proposed 2026-09-16 during Task 1. Awaiting independent review and owner acceptance.
+- **Status:** **Accepted by the repository owner on 2026-09-16.**
 - **Conflict.** Task 1 assigns `Decision` to `internal/run/model.go`, and the
   Task 3 signature `type Finding struct { ... DecisionHint Decision ... }` uses
   the same identifier unqualified inside package `finding`. Task 10 then requires
@@ -106,7 +106,7 @@ the independent reviewer and the repository owner accept it.
 
 ### Amendment 2: `AnalyzerResult` gains its findings field in Task 10
 
-- **Status:** Proposed 2026-09-16 during Task 1. Awaiting independent review and owner acceptance.
+- **Status:** **Accepted on 2026-09-16 as historical context only.** Amendment 4 supersedes the task at which `Findings` appears, and Amendment 5 removes the `duration` field this amendment describes as part of `AnalyzerResult`. The reasoning below stands as a record of why the field was deferred; nothing in it is still in force.
 - **Conflict.** The specification's `AnalyzerResult` carries findings, but
   `finding.Finding` does not exist until Task 3, and the required development
   loop forbids writing production code ahead of the test that demands it.
@@ -120,7 +120,7 @@ the independent reviewer and the repository owner accept it.
 
 ### Amendment 3: `internal/gitdiff` owns its own narrow `Limits`
 
-- **Status:** Proposed 2026-09-16 during Task 2. Awaiting independent review and owner acceptance.
+- **Status:** **Accepted by the repository owner on 2026-09-16.**
 - **Conflict.** The contract block writes `Limits Limits` unqualified inside
   `internal/gitdiff/model.go` while Task 2 also says the package "consumes
   `run.Limits`". Those cannot both be literal: `internal/run` must import
@@ -138,7 +138,7 @@ the independent reviewer and the repository owner accept it.
 
 ### Amendment 4: `AnalyzerResult.Findings` arrives in Task 4, not Task 10
 
-- **Status:** Proposed 2026-09-16 during Task 4. Awaiting independent review and owner acceptance. Supersedes the timing clause of Amendment 2.
+- **Status:** **Accepted by the repository owner on 2026-09-16.** Supersedes the timing clause of Amendment 2.
 - **Conflict.** Amendment 2 deferred `Findings []finding.Finding` to Task 10 on
   the grounds that `finding.Finding` did not yet exist and the required
   development loop forbids production code ahead of its test. Task 3 is now
@@ -155,6 +155,62 @@ the independent reviewer and the repository owner accept it.
   analyzer returning `failed` still yields `incomplete` and exit code `2`.
   Findings placed in the field are still untrusted until `finding.Finalize` has
   validated, redacted, ordered, and fingerprinted them.
+
+### Amendment 5: operational timing lives outside the canonical result
+
+- **Status:** Proposed 2026-09-16 during the Task 4 revision. Awaiting independent review and owner acceptance.
+- **Conflict.** Task 1 gave `AnalyzerResult` a `DurationNanos int64` field
+  serialized as `duration_ns`, and Task 4 filled it with `time.Since(start)`.
+  `CanonicalRunResult` embeds `[]AnalyzerResult`, so a wall-clock reading became
+  part of canonical JSON and therefore part of the integrity digest. That
+  contradicts two standing requirements at once: canonical JSON must be
+  byte-identical for identical bound inputs, and Gate 1 criterion 5 requires
+  deterministic canonical JSON across 100 repeated runs. It also contradicts the
+  premise that a result is a function of the bound revision pair, policy,
+  waivers, limits, and injected `evaluated_at` alone.
+- **Change.** Operational timing is reclassified as telemetry and removed from
+  the canonical surface entirely.
+  - `AnalyzerResult.DurationNanos` is deleted. `AnalyzerResult` now holds only
+    values derived from its bound inputs, and analyzers do not read a clock.
+  - Wall-clock measurement becomes the orchestrator's job. Task 10 introduces a
+    `run.Telemetry` value holding per-analyzer and whole-run durations, returned
+    alongside `CanonicalRunResult` rather than inside it, and carrying no field
+    that appears in the canonical schema.
+  - Telemetry may reach the console, logs, and the hosted control plane. It may
+    never reach canonical JSON, the integrity digest, checks output, Markdown, or
+    SARIF, because those are projections of the canonical result.
+  - `evaluated_at` remains the single clock-derived value in the canonical
+    result. It is injected by the trusted host and fixed in tests, which is
+    exactly what makes it reproducible where a duration is not.
+- **Invariants preserved.** Budget enforcement is unaffected: the 30-second
+  analyzer and 120-second run limits are enforced through context deadlines set
+  by the orchestrator, never through a self-reported duration, so nothing that
+  fails closed today depends on the removed field. No status, decision, exit
+  code, or ordering rule changes. The `Limits` recorded in the canonical result
+  still state the bounds the run was produced under.
+
+### Amendment 6: PFR-WF default classification is owner-set, and critical is reserved
+
+- **Status:** **Set by the repository owner on 2026-09-16** and recorded here. The normative table lives in `docs/analyzers.md`.
+- **Conflict.** Task 4 Step 4 requires each rule test to pin an "expected
+  severity/confidence/decision hint", but neither the plan nor
+  `docs/analyzers.md` stated those values; `docs/analyzers.md` promised "rules
+  with default severity, confidence, and decision hint" and supplied only the
+  decision. The implementer chose provisional values and shipped them in commit
+  `a088e9d`, which made an unreviewed judgement load-bearing for later golden
+  fixtures and policy thresholds.
+- **Change.** The owner set the defaults: `PFR-WF-001` high/high,
+  `PFR-WF-002` high/medium, `PFR-WF-003` medium/high, `PFR-WF-004` high with
+  high confidence when directly reachable and medium when reachability is
+  uncertain, `PFR-WF-005` high/high, `PFR-WF-006` high/medium. Critical severity
+  is reserved for evidence proving exposure of write-capable or equivalently
+  critical authority, so no version 1 PFR-WF rule emits it. The table is
+  normative in `docs/analyzers.md`; the plan defers to it rather than restating
+  it, so the two cannot drift.
+- **Invariants preserved.** Decision hints are unchanged, so no merge outcome
+  moves as a result of this amendment. Severity order and the rule that
+  confidence never raises impact are untouched. `TestNoRuleClaimsCriticalSeverity`
+  enforces the reservation in code rather than leaving it as prose.
 
 ---
 

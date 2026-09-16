@@ -331,13 +331,19 @@ type Analyzer interface {
 // finding.Finalize. They remain untrusted until the orchestrator re-validates
 // them, as docs/analyzers.md requires; see Amendment 4 in the Gate 1 plan for
 // why the field lands in Task 4 rather than Task 10.
+//
+// Every field is a function of the bound inputs alone. There is deliberately no
+// wall-clock duration here: canonical JSON is the source of truth and feeds the
+// integrity digest, so a clock-derived value would make two runs over identical
+// inputs serialize to different bytes. Operational timing is telemetry and is
+// collected by the orchestrator outside the canonical result; see Amendment 5
+// in the Gate 1 plan.
 type AnalyzerResult struct {
 	AnalyzerID      string            `json:"analyzer_id"`
 	AnalyzerVersion string            `json:"analyzer_version"`
 	Completion      Completion        `json:"completion"`
 	Findings        []finding.Finding `json:"findings,omitempty"`
 	CoverageNotes   []string          `json:"coverage_notes,omitempty"`
-	DurationNanos   int64             `json:"duration_ns"`
 	Diagnostics     []Diagnostic      `json:"diagnostics,omitempty"`
 }
 

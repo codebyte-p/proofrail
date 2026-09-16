@@ -119,7 +119,7 @@ func rulePrivilegedUntrustedCheckout(doc parser.Document) []finding.Finding {
 		out = append(out, finding.Finding{
 			RuleID:       "PFR-WF-001",
 			AnalyzerID:   ID,
-			Severity:     finding.SeverityCritical,
+			Severity:     finding.SeverityHigh,
 			Confidence:   finding.ConfidenceHigh,
 			DecisionHint: finding.DecisionBlock,
 			Message: "Job " + safe(job.ID.Value) + " runs on the privileged " + safe(trigger.Name.Value) +
@@ -445,7 +445,7 @@ func ruleExpressionInjection(doc parser.Document) []finding.Finding {
 			out = append(out, finding.Finding{
 				RuleID:       "PFR-WF-004",
 				AnalyzerID:   ID,
-				Severity:     finding.SeverityCritical,
+				Severity:     finding.SeverityHigh,
 				Confidence:   confidence,
 				DecisionHint: decision,
 				Message: "Step " + strconv.Itoa(i) + " of job " + safe(job.ID.Value) +
@@ -522,8 +522,8 @@ func ruleSecretsToUntrustedExecution(doc parser.Document) []finding.Finding {
 		out = append(out, finding.Finding{
 			RuleID:       "PFR-WF-005",
 			AnalyzerID:   ID,
-			Severity:     finding.SeverityCritical,
-			Confidence:   finding.ConfidenceMedium,
+			Severity:     finding.SeverityHigh,
+			Confidence:   finding.ConfidenceHigh,
 			DecisionHint: finding.DecisionBlock,
 			Message: "Job " + safe(job.ID.Value) + " exposes a repository secret to code checked out from the pull request under the privileged " +
 				safe(trigger.Name.Value) + " trigger, so fork-controlled code runs with access to that secret.",
@@ -612,7 +612,7 @@ func ruleSelfHostedRunner(doc parser.Document) []finding.Finding {
 		out = append(out, finding.Finding{
 			RuleID:       "PFR-WF-006",
 			AnalyzerID:   ID,
-			Severity:     finding.SeverityMedium,
+			Severity:     finding.SeverityHigh,
 			Confidence:   finding.ConfidenceMedium,
 			DecisionHint: finding.DecisionRequireReview,
 			Message: "Job " + safe(job.ID.Value) + " runs on a self-hosted runner in response to the " +

@@ -1,7 +1,9 @@
 package workflow_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -132,7 +134,7 @@ func ruleCases() []ruleCase {
 			mustDetect:   true,
 			malicious:    "pfr-wf-001-privileged-untrusted-checkout.yml",
 			benign:       "pfr-wf-001-base-checkout.yml",
-			severity:     finding.SeverityCritical,
+			severity:     finding.SeverityHigh,
 			confidence:   finding.ConfidenceHigh,
 			decision:     finding.DecisionBlock,
 			evidenceKind: "workflow_privileged_checkout",
@@ -166,7 +168,7 @@ func ruleCases() []ruleCase {
 			mustDetect:   true,
 			malicious:    "pfr-wf-004-expression-injection.yml",
 			benign:       "pfr-wf-004-env-indirection.yml",
-			severity:     finding.SeverityCritical,
+			severity:     finding.SeverityHigh,
 			confidence:   finding.ConfidenceHigh,
 			decision:     finding.DecisionBlock,
 			evidenceKind: "workflow_expression_sink",
@@ -178,8 +180,8 @@ func ruleCases() []ruleCase {
 			mustDetect:   true,
 			malicious:    "pfr-wf-005-secrets-to-untrusted.yml",
 			benign:       "pfr-wf-005-secret-on-push.yml",
-			severity:     finding.SeverityCritical,
-			confidence:   finding.ConfidenceMedium,
+			severity:     finding.SeverityHigh,
+			confidence:   finding.ConfidenceHigh,
 			decision:     finding.DecisionBlock,
 			evidenceKind: "workflow_secret_reference",
 			anchorLine:   15,
@@ -189,7 +191,7 @@ func ruleCases() []ruleCase {
 			rule:         "PFR-WF-006",
 			malicious:    "pfr-wf-006-self-hosted.yml",
 			benign:       "pfr-wf-006-hosted-runner.yml",
-			severity:     finding.SeverityMedium,
+			severity:     finding.SeverityHigh,
 			confidence:   finding.ConfidenceMedium,
 			decision:     finding.DecisionRequireReview,
 			evidenceKind: "workflow_runner_label",
@@ -342,10 +344,80 @@ func TestAnalyzerFailsClosedOnRejectedWorkflow(t *testing.T) {
 			if len(result.Diagnostics) == 0 {
 				t.Error("a failed analyzer must explain itself with diagnostics")
 			}
+			// A rejected workflow yields no findings of its own. Evidence from
+			// workflows that did parse is preserved separately; see
+			// TestFindingsSurviveAnotherWorkflowFailingToParse.
 			if len(result.Findings) != 0 {
 				t.Errorf("a rejected workflow must not yield findings, got %v", ruleIDs(result))
 			}
 		})
+	}
+}
+
+// TestNoRuleClaimsCriticalSeverity holds the reservation line: critical is for
+// evidence proving exposure of write-capable or equivalently critical
+// authority, and no version 1 PFR-WF rule proves that on its own.
+func TestNoRuleClaimsCriticalSeverity(t *testing.T) {
+	for _, tc := range ruleCases() {
+		t.Run(tc.rule, func(t *testing.T) {
+			result := analyze(t, addedWorkflow(t, "malicious", tc.malicious))
+			for _, f := range result.Findings {
+				if f.Severity == finding.SeverityCritical {
+					t.Errorf("%s claims critical severity without evidence of write-capable authority", f.RuleID)
+				}
+			}
+		})
+	}
+}
+
+// TestFindingsSurviveAnotherWorkflowFailingToParse proves completed evidence is
+// retained when a different workflow in the same change set is rejected.
+//
+// The run still fails closed through the completion ledger, but discarding
+// findings that were fully analyzed would throw away real evidence and tell a
+// reviewer less than the engine actually knows.
+func TestFindingsSurviveAnotherWorkflowFailingToParse(t *testing.T) {
+	result := analyze(t,
+		addedWorkflow(t, "malicious", "pfr-wf-001-privileged-untrusted-checkout.yml"),
+		addedWorkflow(t, "malformed", "duplicate-key.yml"),
+	)
+
+	if result.Completion != run.CompletionFailed {
+		t.Fatalf("completion = %q, want failed", result.Completion)
+	}
+	if len(result.Diagnostics) == 0 {
+		t.Error("a failed analyzer must explain itself with diagnostics")
+	}
+	if len(findingsFor(result, "PFR-WF-001")) != 1 {
+		t.Fatalf("the finding from the workflow that parsed was discarded; rules present: %v", ruleIDs(result))
+	}
+}
+
+// TestAnalyzerResultCarriesNoOperationalTiming proves the serialized result is
+// byte-identical for identical bound inputs.
+//
+// Canonical JSON is the source of truth and feeds the integrity digest, so no
+// clock-derived value may appear in it. Operational timing is telemetry and
+// belongs outside the canonical projection.
+func TestAnalyzerResultCarriesNoOperationalTiming(t *testing.T) {
+	change := addedWorkflow(t, "malicious", "pfr-wf-001-privileged-untrusted-checkout.yml")
+
+	first, err := json.Marshal(analyze(t, change))
+	if err != nil {
+		t.Fatalf("marshal first result: %v", err)
+	}
+	second, err := json.Marshal(analyze(t, change))
+	if err != nil {
+		t.Fatalf("marshal second result: %v", err)
+	}
+
+	if !bytes.Equal(first, second) {
+		t.Fatalf("analyzer result is not byte-identical across runs over identical input:\n first: %s\nsecond: %s", first, second)
+	}
+	for _, forbidden := range []string{"duration", "elapsed", "_ns"} {
+		if bytes.Contains(bytes.ToLower(first), []byte(forbidden)) {
+			t.Errorf("the canonical projection carries operational timing (%q): %s", forbidden, first)
+		}
 	}
 }
 

@@ -65,24 +65,17 @@ A task counts as done only when its focused tests, `go test ./...`, and
 
 ## Plan amendments awaiting review
 
-All four amendments are recorded in full in the Gate 1 plan and are **proposed,
-not accepted**. Gate 1 cannot close while any of them is unreviewed.
+All six amendments are recorded in full in the Gate 1 plan. Gate 1 cannot close
+while any of them is unreviewed.
 
-- **Amendment 1** — the ordered `Severity`, `Confidence`, and `Decision` enums are
-  defined in `internal/finding` and re-exported from `internal/run` as type
-  aliases, because defining them in `internal/run` produces an import cycle once
-  Task 10 orchestrates `[]finding.Finding`.
-- **Amendment 2** — `AnalyzerResult` gains its `Findings` field in Task 10 rather
-  than Task 1, because `finding.Finding` does not exist until Task 3 and the
-  development loop forbids production code ahead of its test. Superseded on its
-  timing by Amendment 4.
-- **Amendment 3** — `internal/gitdiff` defines its own narrow `Limits` instead of
-  importing `run.Limits`, because `internal/run` must import `internal/gitdiff`
-  for `AnalysisInput.Changes`. Proposed during Task 2 and recorded here during
-  Task 4.
-- **Amendment 4** — `AnalyzerResult.Findings` arrives in Task 4 rather than Task
-  10, because the PFR-WF analyzer test is the first test that requires the field
-  and `finding.Finding` already exists once Task 3 is complete.
+| # | Summary | State |
+|---|---|---|
+| 1 | The ordered `Severity`, `Confidence`, and `Decision` enums are defined in `internal/finding` and re-exported from `internal/run` as type aliases, because defining them in `internal/run` produces an import cycle once Task 10 orchestrates `[]finding.Finding`. | **accepted 2026-09-16** |
+| 2 | `AnalyzerResult` gains its `Findings` field in Task 10 rather than Task 1. | **accepted 2026-09-16 as historical context only**; superseded by Amendment 4 on when `Findings` appears and by Amendment 5 on the `duration` field it describes |
+| 3 | `internal/gitdiff` defines its own narrow `Limits` instead of importing `run.Limits`, because `internal/run` must import `internal/gitdiff` for `AnalysisInput.Changes`. | **accepted 2026-09-16** |
+| 4 | `AnalyzerResult.Findings` arrives in Task 4 rather than Task 10, because the PFR-WF analyzer test is the first test that requires the field. | **accepted 2026-09-16** |
+| 5 | Operational timing is telemetry: `AnalyzerResult.DurationNanos` is deleted, analyzers read no clock, and Task 10's orchestrator collects durations in a `run.Telemetry` value outside `CanonicalRunResult`. | proposed, awaiting review |
+| 6 | The owner set the PFR-WF default severity and confidence table, normative in `docs/analyzers.md`, and reserved `critical` for evidence proving exposure of write-capable or equivalently critical authority. | **set by the owner 2026-09-16** |
 
 ## Dependency additions
 
