@@ -118,6 +118,24 @@ the independent reviewer and the repository owner accept it.
   analyzer returning `failed` yields `incomplete` are unchanged; only the moment
   the field appears moves.
 
+### Amendment 3: `internal/gitdiff` owns its own narrow `Limits`
+
+- **Status:** Proposed 2026-09-16 during Task 2. Awaiting independent review and owner acceptance.
+- **Conflict.** The contract block writes `Limits Limits` unqualified inside
+  `internal/gitdiff/model.go` while Task 2 also says the package "consumes
+  `run.Limits`". Those cannot both be literal: `internal/run` must import
+  `internal/gitdiff` for `AnalysisInput.Changes`, so `internal/gitdiff` importing
+  `internal/run` would close a second cycle.
+- **Change.** `internal/gitdiff` defines its own `Limits` holding only the two
+  bounds it actually enforces, `MaxChangedFiles` and `MaxChangedContentBytes`.
+  `run.Limits` gains a `ForGitDiff()` converter in Task 10, so the architecture
+  limits stay the single source of truth and `internal/gitdiff` stays the owner of
+  changed-file limits as `CLAUDE.md` requires. The dependency direction becomes
+  `run -> gitdiff`.
+- **Invariants preserved.** The enforced values are unchanged: 5,000 changed files
+  and 50 MiB of aggregate changed content. Exceeding either still yields an
+  `incomplete`-class failure.
+
 ---
 
 ## Task 1: Toolchain, module, CI, and terminal contracts
@@ -197,29 +215,29 @@ Commit: `feat: establish gate 1 runtime contracts`
 - Consumes `run.Limits`.
 - Produces `gitdiff.Loader`, `Request`, `ChangeSet`, and `FileChange`.
 
-- [ ] **Step 1: Write path-normalization table tests**
+- [x] **Step 1: Write path-normalization table tests**
 
 Test acceptance of `src/auth/login.go` and `a/b-c_1.yml`; test rejection of `/etc/passwd`, `C:\\secret`, `../secret`, `a/../../b`, `a\\b`, `.`, empty input, and a NUL-containing string. Assert stable diagnostic code `path.invalid` without echoing the rejected value.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `go test ./internal/gitdiff -run TestNormalizeRepoPath -v`
 
 Expected: compile failure because `NormalizeRepoPath` is missing.
 
-- [ ] **Step 3: Implement lexical normalization**
+- [x] **Step 3: Implement lexical normalization**
 
 Implement `NormalizeRepoPath(raw string) (string, error)` using `path.Clean`, explicit pre-checks for NUL/backslash/absolute/drive syntax, and post-checks for `.` and `..`. Do not call `filepath.Abs`, `EvalSymlinks`, or access the filesystem.
 
-- [ ] **Step 4: Write failing Git-loader integration tests**
+- [x] **Step 4: Write failing Git-loader integration tests**
 
 Create a temporary repository with hooks disabled, two commits, added/modified/deleted/renamed files, and assert exact base/head hashes and sorted normalized changes. Add tests proving invalid SHAs, more than 5,000 files, more than 50 MiB content, symlink targets, submodule entries, and external filters produce `incomplete`-class errors rather than execution.
 
-- [ ] **Step 5: Implement constrained Git invocation**
+- [x] **Step 5: Implement constrained Git invocation**
 
 Invoke Git with an explicit executable and arguments, `cmd.Dir` set to the supplied repository, a minimal environment, `GIT_CONFIG_NOSYSTEM=1`, `GIT_TERMINAL_PROMPT=0`, `GIT_OPTIONAL_LOCKS=0`, `-c core.hooksPath=<empty temp dir>`, `-c filter.lfs.smudge=`, `-c filter.lfs.required=false`, `-c diff.external=`, and `--no-ext-diff`. Resolve commits with `rev-parse --verify <sha>^{commit}` and reject if returned hashes differ from the requested immutable hashes. Never initialize submodules or run checkout hooks.
 
-- [ ] **Step 6: Verify and commit**
+- [x] **Step 6: Verify and commit**
 
 Run: `go test ./internal/gitdiff -v && go test ./... && go vet ./...`
 

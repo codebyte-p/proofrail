@@ -50,7 +50,7 @@ A task counts as done only when its focused tests, `go test ./...`, and
 | Task | Scope | Branch | State |
 |---|---|---|---|
 | 1 | Toolchain, module, CI, terminal contracts | `feat/gate1-contracts` | done |
-| 2 | Safe paths and immutable Git revision binding | — | not started |
+| 2 | Safe paths and immutable Git revision binding | `feat/gate1-gitdiff` | done |
 | 3 | Findings, redaction, ordering, fingerprints | — | not started |
 | 4 | Bounded workflow parser and PFR-WF analyzer | — | not started |
 | 5 | npm/Python parsing and PFR-DEP analyzer | — | not started |
