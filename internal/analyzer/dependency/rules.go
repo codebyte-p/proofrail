@@ -13,32 +13,80 @@ import (
 // docs/analyzers.md specifies "observe or require review by threshold".
 const graphExpansionReviewThreshold = 3
 
+// budget bounds candidate generation.
+//
+// Enforcing a ceiling only on the returned slice still let a hostile manifest
+// drive every rule over every declaration and pay for a Finalize -- redaction
+// plus a SHA-256 -- on each result before anything was discarded. The budget is
+// therefore consulted while candidates are produced, so the work itself is
+// bounded rather than only the output.
+type budget struct {
+	limit     int
+	generated int
+	items     []finding.Finding
+	exceeded  bool
+}
+
+func newBudget(limit int) *budget {
+	if limit <= 0 {
+		limit = defaultFindingCeiling
+	}
+	return &budget{limit: limit}
+}
+
+// full reports whether the budget is spent. A rule checks this inside its loop
+// so it stops iterating rather than building results that will be thrown away.
+func (b *budget) full() bool { return len(b.items) >= b.limit }
+
+// add offers one candidate and reports whether the caller may continue.
+func (b *budget) add(f finding.Finding) bool {
+	b.generated++
+	if b.full() {
+		b.exceeded = true
+		return false
+	}
+	b.items = append(b.items, f)
+	return true
+}
+
+// defaultFindingCeiling applies when a caller supplies no limit. It mirrors the
+// architecture ceiling so an unconfigured run is still bounded.
+const defaultFindingCeiling = 5000
+
 // evaluate runs every PFR-DEP rule over the base/head comparison.
 //
 // Rules are independent by construction: each appends its own candidates and
 // none reads or edits another's output, so a change that trips several rules
 // reports all of them.
-func evaluate(base, head Snapshot) []finding.Finding {
-	var out []finding.Finding
-	out = append(out, ruleManifestLockMismatch(base, head)...)
-	out = append(out, ruleNonRegistryDependency(base, head)...)
-	out = append(out, ruleLifecycleExecution(base, head)...)
-	out = append(out, ruleResolvedSourceChanged(base, head)...)
-	out = append(out, ruleGraphExpansion(base, head)...)
-	out = append(out, ruleNameSimilarity(base, head)...)
-	return out
+func evaluate(base, head Snapshot, b *budget) {
+	for _, rule := range []func(Snapshot, Snapshot, *budget){
+		ruleManifestLockMismatch,
+		ruleNonRegistryDependency,
+		ruleLifecycleExecution,
+		ruleResolvedSourceChanged,
+		ruleGraphExpansion,
+		ruleNameSimilarity,
+	} {
+		if b.full() {
+			b.exceeded = true
+			return
+		}
+		rule(base, head, b)
+	}
 }
 
 // ----------------------------------------------------------------------------
 // PFR-DEP-001: manifest-lock mismatch
 // ----------------------------------------------------------------------------
 
-func ruleManifestLockMismatch(base, head Snapshot) []finding.Finding {
-	var out []finding.Finding
+func ruleManifestLockMismatch(base, head Snapshot, b *budget) {
 	for _, eco := range ecosystems {
-		out = append(out, mismatchForEcosystem(eco, base, head)...)
+		for _, f := range mismatchForEcosystem(eco, base, head) {
+			if !b.add(f) {
+				return
+			}
+		}
 	}
-	return out
 }
 
 // mismatchForEcosystem reports the three shapes of manifest/lock disagreement.
@@ -73,7 +121,7 @@ func mismatchForEcosystem(eco Ecosystem, base, head Snapshot) []finding.Finding 
 	}
 
 	baseDeclared := base.declaredNames()
-	resolved := head.resolvedByName()
+	resolutions := head.resolutionsByName()
 
 	var unresolved, inconsistent []Declared
 	for _, d := range head.Declared {
@@ -85,25 +133,22 @@ func mismatchForEcosystem(eco Ecosystem, base, head Snapshot) []finding.Finding 
 		if d.Source == SourcePath || d.Source == SourceWorkspace {
 			continue
 		}
-		previous, existed := baseDeclared[recordKey(d.Ecosystem, d.Name)]
+		previous, existed := baseDeclared[declaredKey(d)]
 		newDeclaration := !existed
 		changedSpec := existed && previous.Spec != d.Spec
 
-		r, isResolved := resolved[recordKey(d.Ecosystem, d.Name)]
+		found := resolutions[nameKey(d.Ecosystem, d.Name)]
 		switch {
-		case !head.LockSeen[eco]:
-			// No lockfile was part of this change. Only a declaration this
-			// change introduced or altered is attributable to it.
+		case !head.LockSeen[eco], len(found) == 0:
+			// Either no lockfile was part of this change, or it resolved
+			// nothing under this name. Only a declaration this change
+			// introduced or altered is attributable to it.
 			if newDeclaration || changedSpec {
 				unresolved = append(unresolved, d)
 			}
-		case !isResolved:
-			if newDeclaration || changedSpec {
-				unresolved = append(unresolved, d)
-			}
-		case d.Pinned != "" && r.Version != "" && d.Pinned != r.Version:
-			// The name is present but the lock resolved a different version
-			// than the manifest pins. Checking presence alone missed this.
+		case d.Pinned != "" && !anyResolutionMatches(found, d.Pinned):
+			// The name is present but no resolution carries the version the
+			// manifest pins. Checking presence alone missed this.
 			inconsistent = append(inconsistent, d)
 		}
 	}
@@ -133,7 +178,7 @@ func mismatchForEcosystem(eco Ecosystem, base, head Snapshot) []finding.Finding 
 		evidence = append(evidence, finding.Evidence{
 			Kind:    "dependency_declaration",
 			Source:  d.Path + " " + d.Kind,
-			Excerpt: d.Name + " pins " + d.Pinned + ", lock resolves " + resolved[recordKey(d.Ecosystem, d.Name)].Version,
+			Excerpt: d.Name + " pins " + d.Pinned + ", lock resolves " + resolvedVersions(resolutions[nameKey(d.Ecosystem, d.Name)]),
 		})
 		locations = append(locations, location(d.Path, d.Pos))
 	}
@@ -177,11 +222,14 @@ func lockPathFor(eco Ecosystem) string {
 // PFR-DEP-002: non-registry dependency
 // ----------------------------------------------------------------------------
 
-func ruleNonRegistryDependency(base, head Snapshot) []finding.Finding {
+func ruleNonRegistryDependency(base, head Snapshot, b *budget) {
 	baseDeclared := base.declaredNames()
 
-	var out []finding.Finding
 	for _, d := range head.Declared {
+		if b.full() {
+			b.exceeded = true
+			return
+		}
 		if d.Source == SourceRegistry && d.Immutable {
 			continue
 		}
@@ -190,7 +238,7 @@ func ruleNonRegistryDependency(base, head Snapshot) []finding.Finding {
 			// lock resolution rather than by this rule.
 			continue
 		}
-		if previous, existed := baseDeclared[recordKey(d.Ecosystem, d.Name)]; existed && previous.Spec == d.Spec {
+		if previous, existed := baseDeclared[declaredKey(d)]; existed && previous.Spec == d.Spec {
 			continue
 		}
 
@@ -200,16 +248,19 @@ func ruleNonRegistryDependency(base, head Snapshot) []finding.Finding {
 		// routed such a path to review.
 		// Outside the repository or mutable means the bytes a build fetches can
 		// change without any change here; that is the blocking condition.
-		outsideRepository := d.Source == SourceGit || d.Source == SourceURL ||
-			(d.Source == SourcePath && pathEscapesRepository(d.Spec))
+		// docs/analyzers.md: "Require review; block if mutable or outside
+		// repository." Requiring both conditions let a mutable reference that
+		// happened to sit inside the tree, and an escaping path that was not
+		// otherwise mutable, each fall through to review.
+		outsideRepository := d.Source == SourceGit || d.Source == SourceURL || d.Escapes
 		decision := finding.DecisionRequireReview
 		severity := finding.SeverityMedium
-		if !d.Immutable && outsideRepository {
+		if !d.Immutable || outsideRepository {
 			decision = finding.DecisionBlock
 			severity = finding.SeverityHigh
 		}
 
-		out = append(out, finding.Finding{
+		if !b.add(finding.Finding{
 			RuleID:       "PFR-DEP-002",
 			AnalyzerID:   ID,
 			Severity:     severity,
@@ -227,25 +278,29 @@ func ruleNonRegistryDependency(base, head Snapshot) []finding.Finding {
 				"A monorepo may intentionally use local or workspace dependencies, and a private registry or mirror can look unfamiliar without repository configuration.",
 				"Offline analysis cannot confirm what the reference currently resolves to.",
 			},
-		})
+		}) {
+			return
+		}
 	}
-	return out
 }
 
 // ----------------------------------------------------------------------------
 // PFR-DEP-003: lifecycle execution introduced
 // ----------------------------------------------------------------------------
 
-func ruleLifecycleExecution(base, head Snapshot) []finding.Finding {
+func ruleLifecycleExecution(base, head Snapshot, b *budget) {
 	previous := base.scriptsByName()
 
-	var out []finding.Finding
 	for _, script := range head.Scripts {
+		if b.full() {
+			b.exceeded = true
+			return
+		}
 		if !isLifecycleScript(script.Name) && !strings.Contains(script.Name, "install script") &&
 			script.Name != "build-backend" {
 			continue
 		}
-		before, existed := previous[recordKey(script.Ecosystem, script.Name)]
+		before, existed := previous[scriptKey(script)]
 		if existed && before.Body == script.Body {
 			continue
 		}
@@ -255,7 +310,7 @@ func ruleLifecycleExecution(base, head Snapshot) []finding.Finding {
 			verb = "changes"
 		}
 
-		out = append(out, finding.Finding{
+		if !b.add(finding.Finding{
 			RuleID:       "PFR-DEP-003",
 			AnalyzerID:   ID,
 			Severity:     finding.SeverityMedium,
@@ -273,21 +328,25 @@ func ruleLifecycleExecution(base, head Snapshot) []finding.Finding {
 				"A lifecycle script may be entirely benign and still expand install-time execution authority, which is why this routes to review rather than asserting misuse.",
 				"The script is recorded as inert text; version 1 does not execute or trace it.",
 			},
-		})
+		}) {
+			return
+		}
 	}
-	return out
 }
 
 // ----------------------------------------------------------------------------
 // PFR-DEP-004: resolved source changed unexpectedly
 // ----------------------------------------------------------------------------
 
-func ruleResolvedSourceChanged(base, head Snapshot) []finding.Finding {
-	previous := base.resolvedByName()
+func ruleResolvedSourceChanged(base, head Snapshot, b *budget) {
+	previous := base.resolvedInstances()
 
-	var out []finding.Finding
 	for _, current := range head.Resolved {
-		before, existed := previous[recordKey(current.Ecosystem, current.Name)]
+		if b.full() {
+			b.exceeded = true
+			return
+		}
+		before, existed := previous[resolvedKey(current)]
 		if !existed {
 			continue
 		}
@@ -304,7 +363,7 @@ func ruleResolvedSourceChanged(base, head Snapshot) []finding.Finding {
 			continue
 		}
 
-		out = append(out, finding.Finding{
+		if !b.add(finding.Finding{
 			RuleID:       "PFR-DEP-004",
 			AnalyzerID:   ID,
 			Severity:     finding.SeverityHigh,
@@ -329,26 +388,27 @@ func ruleResolvedSourceChanged(base, head Snapshot) []finding.Finding {
 				"A deliberate registry migration or mirror change produces this same evidence, so the reason for the change has to come from the pull request itself.",
 				"Offline analysis cannot fetch either artifact to compare their contents.",
 			},
-		})
+		}) {
+			return
+		}
 	}
-	return out
 }
 
 // ----------------------------------------------------------------------------
 // PFR-DEP-005: dependency graph expansion
 // ----------------------------------------------------------------------------
 
-func ruleGraphExpansion(base, head Snapshot) []finding.Finding {
+func ruleGraphExpansion(base, head Snapshot, b *budget) {
 	baseDeclared := base.declaredNames()
 
 	var added []Declared
 	for _, d := range head.Declared {
-		if _, existed := baseDeclared[recordKey(d.Ecosystem, d.Name)]; !existed {
+		if _, existed := baseDeclared[declaredKey(d)]; !existed {
 			added = append(added, d)
 		}
 	}
 	if len(added) == 0 {
-		return nil
+		return
 	}
 	sort.Slice(added, func(i, j int) bool { return added[i].Name < added[j].Name })
 
@@ -369,7 +429,7 @@ func ruleGraphExpansion(base, head Snapshot) []finding.Finding {
 		locations = append(locations, location(d.Path, d.Pos))
 	}
 
-	return []finding.Finding{{
+	b.add(finding.Finding{
 		RuleID:       "PFR-DEP-005",
 		AnalyzerID:   ID,
 		Severity:     severity,
@@ -387,7 +447,35 @@ func ruleGraphExpansion(base, head Snapshot) []finding.Finding {
 			"The transitive count is taken from the lockfiles present in this change set; a lock that was not changed contributes no delta.",
 			"Graph size is a review-surface signal, not evidence that any particular dependency is unsafe.",
 		},
-	}}
+	})
+}
+
+// anyResolutionMatches reports whether any resolution of a name carries the
+// version the manifest pins. A lockfile may legitimately resolve one name at
+// several versions, so a pin is satisfied if any instance matches.
+func anyResolutionMatches(found []Resolved, pinned string) bool {
+	for _, r := range found {
+		if r.Version == "" || r.Version == pinned {
+			return true
+		}
+	}
+	return false
+}
+
+// resolvedVersions lists the versions a name resolved to, in a stable order, so
+// the evidence names every instance rather than an arbitrary one.
+func resolvedVersions(found []Resolved) string {
+	seen := make(map[string]bool, len(found))
+	versions := make([]string, 0, len(found))
+	for _, r := range found {
+		if r.Version == "" || seen[r.Version] {
+			continue
+		}
+		seen[r.Version] = true
+		versions = append(versions, r.Version)
+	}
+	sort.Strings(versions)
+	return strings.Join(versions, ", ")
 }
 
 func signed(n int) string {
@@ -407,10 +495,10 @@ func signed(n int) string {
 // docs/analyzers.md fixes this rule at warn for version 1 because the heuristic
 // is noisy. The decision hint is a constant here rather than a computed value,
 // so no input can raise it, and a test asserts that property.
-func ruleNameSimilarity(base, head Snapshot) []finding.Finding {
+func ruleNameSimilarity(base, head Snapshot, b *budget) {
 	baseDeclared := base.declaredNames()
 	if len(baseDeclared) == 0 {
-		return nil
+		return
 	}
 
 	// Typosquatting happens within one registry, so a candidate is only
@@ -425,9 +513,12 @@ func ruleNameSimilarity(base, head Snapshot) []finding.Finding {
 		sort.Strings(existingByEcosystem[eco])
 	}
 
-	var out []finding.Finding
 	for _, d := range head.Declared {
-		if _, existed := baseDeclared[recordKey(d.Ecosystem, d.Name)]; existed {
+		if b.full() {
+			b.exceeded = true
+			return
+		}
+		if _, existed := baseDeclared[declaredKey(d)]; existed {
 			continue
 		}
 		neighbour, similar := nearestNeighbour(d.Name, existingByEcosystem[d.Ecosystem])
@@ -435,7 +526,7 @@ func ruleNameSimilarity(base, head Snapshot) []finding.Finding {
 			continue
 		}
 
-		out = append(out, finding.Finding{
+		if !b.add(finding.Finding{
 			RuleID:       "PFR-DEP-006",
 			AnalyzerID:   ID,
 			Severity:     finding.SeverityLow,
@@ -453,9 +544,10 @@ func ruleNameSimilarity(base, head Snapshot) []finding.Finding {
 				"Name similarity is a noisy heuristic and cannot distinguish a typosquat from a legitimate companion package, so version 1 only warns and never blocks on it.",
 				"A genuinely unrelated package with a similar name produces this same evidence.",
 			},
-		})
+		}) {
+			return
+		}
 	}
-	return out
 }
 
 // nearestNeighbour returns the most similar existing name, if any is close

@@ -1,6 +1,9 @@
 package dependency
 
-import "strings"
+import (
+	"path"
+	"strings"
+)
 
 // This file holds the per-ecosystem adapters.
 //
@@ -201,14 +204,16 @@ func pythonGitReferenceIsImmutable(ref string) bool {
 }
 
 // classifyUVSource reads a `[tool.uv.sources]` entry.
-func classifyUVSource(git, url, path, branch, tag, rev string) (SourceKind, bool) {
+// The local-path parameter is named localPath so it cannot shadow the `path`
+// package this file uses for containment resolution.
+func classifyUVSource(git, url, localPath, branch, tag, rev string) (SourceKind, bool) {
 	switch {
 	case git != "":
 		// A rev may be a full commit hash; a branch or tag may move.
 		return SourceGit, branch == "" && tag == "" && isCommitHash(rev)
 	case url != "":
 		return SourceURL, false
-	case path != "":
+	case localPath != "":
 		return SourcePath, false
 	default:
 		return SourceUnknown, false
@@ -221,12 +226,12 @@ func classifyUVSource(git, url, path, branch, tag, rev string) (SourceKind, bool
 // The check is lexical and slash-based, matching how these specifiers are
 // written rather than how the host filesystem would resolve them, so it cannot
 // be changed by the platform the scan runs on.
-func pathEscapesRepository(spec string) bool {
+func pathEscapesRepository(spec, manifestPath string) bool {
 	s := strings.TrimSpace(spec)
-	for _, prefix := range []string{"file:", "link:"} {
+	for _, prefix := range []string{"file:", "link:", "workspace:"} {
 		s = strings.TrimPrefix(s, prefix)
 	}
-	if s == "" {
+	if s == "" || s == "*" {
 		return false
 	}
 	s = strings.ReplaceAll(s, `\`, "/")
@@ -242,22 +247,12 @@ func pathEscapesRepository(spec string) bool {
 		}
 	}
 
-	// Otherwise walk the segments: a `..` that no earlier segment cancels
-	// climbs above the repository root.
-	depth := 0
-	for _, segment := range strings.Split(s, "/") {
-		switch segment {
-		case "", ".":
-		case "..":
-			depth--
-			if depth < 0 {
-				return true
-			}
-		default:
-			depth++
-		}
-	}
-	return false
+	// A relative specifier is written relative to the manifest that declares
+	// it, so `../lib` from `packages/a/package.json` stays inside the
+	// repository while the same text from a root manifest does not. Resolving
+	// it from the repository root instead would have judged both the same.
+	resolved := path.Join(path.Dir(manifestPath), s)
+	return resolved == ".." || strings.HasPrefix(resolved, "../")
 }
 
 // isCommitHash reports whether s is a full 40-character lowercase hash, the

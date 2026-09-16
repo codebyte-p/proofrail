@@ -1,7 +1,9 @@
 package python
 
 import (
-	"strings"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 
 	"github.com/codebyte-p/proofrail/internal/run"
 )
@@ -235,53 +237,57 @@ func (r *reader) decodeLockPackage(t *table) (LockedPackage, bool) {
 	return pkg, true
 }
 
-// maxArtifactHashBytes bounds the combined identity so a package declaring a
-// very large number of wheels cannot grow the record without limit.
-const maxArtifactHashBytes = 2048
-
-// artifactIdentity returns every declared artifact digest for a package, joined
-// in document order.
+// artifactIdentity folds every declared artifact digest for a package into one
+// fixed-size value.
 //
-// A uv.lock package lists one wheel per platform. Taking only the first digest
-// meant substituting any later wheel left the identity unchanged, so
-// PFR-DEP-004 could not see the swap. The position reported is that of the
-// first digest, which is where a reader should look.
+// A uv.lock package lists one wheel per platform, and a package may declare
+// many. Taking only the first digest meant substituting any later wheel left
+// the identity unchanged; truncating the joined list at a byte budget had the
+// same effect for anything past the cut. Every digest is therefore streamed
+// into a SHA-256 in document order, so the result is bounded without omitting
+// a tail, and any substitution anywhere changes it.
+//
+// Each digest is length-framed before it is absorbed, so `["ab","c"]` and
+// `["a","bc"]` cannot fold to the same value. The position reported is that of
+// the first digest, which is where a reader should look.
 func (r *reader) artifactIdentity(t *table) Scalar {
 	var (
-		parts []string
-		pos   Position
-		size  int
+		digest = sha256.New()
+		pos    Position
+		count  int
 	)
-	add := func(h Scalar) {
+	absorb := func(h Scalar) {
 		if !h.Present() || h.Value == "" {
 			return
 		}
 		if pos.Line == 0 {
 			pos = h.Pos
 		}
-		if size+len(h.Value) > maxArtifactHashBytes {
-			return
-		}
-		size += len(h.Value)
-		parts = append(parts, h.Value)
+		count++
+		// Length framing keeps two different digest lists from colliding.
+		fmt.Fprintf(digest, "%d:", len(h.Value))
+		digest.Write([]byte(h.Value))
 	}
 
 	if sdist, _, ok := t.get("sdist"); ok && sdist.kind == vTable {
-		add(sdist.table.str("hash"))
+		absorb(sdist.table.str("hash"))
 	}
 	if wheels, _, ok := t.get("wheels"); ok && wheels.kind == vArray {
 		for _, wheel := range wheels.array {
 			if wheel.kind != vTable {
 				continue
 			}
-			add(wheel.table.str("hash"))
+			absorb(wheel.table.str("hash"))
 		}
 	}
 
-	if len(parts) == 0 {
+	if count == 0 {
 		return Scalar{}
 	}
-	return Scalar{Value: strings.Join(parts, " "), Pos: pos}
+	return Scalar{
+		Value: "sha256:" + hex.EncodeToString(digest.Sum(nil)),
+		Pos:   pos,
+	}
 }
 
 // stringList reads a named array of strings, recording any non-string element

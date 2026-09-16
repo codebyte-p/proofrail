@@ -60,9 +60,13 @@ type Declared struct {
 	Kind      string
 	Source    SourceKind
 	Immutable bool
-	Pinned    string
-	Path      string
-	Pos       Position
+	// Escapes records that a local path resolves outside the repository tree,
+	// which docs/analyzers.md treats as grounds to block independently of
+	// whether the reference is mutable.
+	Escapes bool
+	Pinned  string
+	Path    string
+	Pos     Position
 }
 
 // LockResolved reports whether a lockfile is expected to resolve this
@@ -79,9 +83,15 @@ func (d Declared) LockResolved() bool { return d.Kind != buildRequirementKind }
 // Identity is the comparable resolved identity: the artifact location plus its
 // integrity value. PFR-DEP-004 compares it across revisions, so it must change
 // only when the bytes a build would fetch change.
+// Instance distinguishes two resolutions of the same package name within one
+// lockfile. npm nests transitive installs, so `node_modules/a` and
+// `node_modules/b/node_modules/a` are different packages at different versions;
+// collapsing them by name kept only whichever came last and let a substitution
+// in one hide behind the other.
 type Resolved struct {
 	Ecosystem Ecosystem
 	Name      string
+	Instance  string
 	Version   string
 	Location  string
 	Integrity string
@@ -143,25 +153,59 @@ func (s *Snapshot) markLockDeleted(eco Ecosystem) {
 	s.LockDeleted[eco] = true
 }
 
-// recordKey namespaces a record by its ecosystem.
+// Record identity.
 //
-// A package name is only unique within its own registry: `requests` exists on
-// both npm and PyPI. Keying by name alone let a record from one ecosystem mask
-// a different package of the same name in another.
-func recordKey(eco Ecosystem, name string) string { return string(eco) + "\x00" + name }
+// A package name is unique only within one registry and one declaring file.
+// `requests` exists on both npm and PyPI; a monorepo declares the same
+// dependency in several workspace manifests; and an npm lockfile resolves the
+// same name at several versions under different install paths. Keying by name
+// alone collapsed all three, so one record masked another and a change to the
+// masked one went unseen.
+//
+// nameKey is deliberately coarser than the others: it answers "does this
+// ecosystem's lock resolve this name anywhere", which is the question
+// PFR-DEP-001 asks and which must not be narrowed by install path.
+func nameKey(eco Ecosystem, name string) string { return string(eco) + "\x00" + name }
 
+func declaredKey(d Declared) string {
+	return string(d.Ecosystem) + "\x00" + d.Path + "\x00" + d.Name
+}
+
+func resolvedKey(r Resolved) string {
+	return string(r.Ecosystem) + "\x00" + r.Path + "\x00" + r.Instance
+}
+
+func scriptKey(s Script) string {
+	return string(s.Ecosystem) + "\x00" + s.Path + "\x00" + s.Name
+}
+
+// declaredNames indexes declarations by ecosystem, manifest, and name, so the
+// same dependency in two workspace manifests stays two records.
 func (s Snapshot) declaredNames() map[string]Declared {
 	out := make(map[string]Declared, len(s.Declared))
 	for _, d := range s.Declared {
-		out[recordKey(d.Ecosystem, d.Name)] = d
+		out[declaredKey(d)] = d
 	}
 	return out
 }
 
-func (s Snapshot) resolvedByName() map[string]Resolved {
+// resolvedInstances indexes every resolution separately, so a nested install of
+// the same name at a different version is its own record.
+func (s Snapshot) resolvedInstances() map[string]Resolved {
 	out := make(map[string]Resolved, len(s.Resolved))
 	for _, r := range s.Resolved {
-		out[recordKey(r.Ecosystem, r.Name)] = r
+		out[resolvedKey(r)] = r
+	}
+	return out
+}
+
+// resolutionsByName groups every resolution of a name within one ecosystem,
+// preserving the distinct versions and paths rather than keeping only the last.
+func (s Snapshot) resolutionsByName() map[string][]Resolved {
+	out := make(map[string][]Resolved, len(s.Resolved))
+	for _, r := range s.Resolved {
+		key := nameKey(r.Ecosystem, r.Name)
+		out[key] = append(out[key], r)
 	}
 	return out
 }
@@ -169,7 +213,7 @@ func (s Snapshot) resolvedByName() map[string]Resolved {
 func (s Snapshot) scriptsByName() map[string]Script {
 	out := make(map[string]Script, len(s.Scripts))
 	for _, sc := range s.Scripts {
-		out[recordKey(sc.Ecosystem, sc.Name)] = sc
+		out[scriptKey(sc)] = sc
 	}
 	return out
 }

@@ -509,14 +509,13 @@ func TestNPMGitShorthandIsNotTreatedAsRegistry(t *testing.T) {
 			if len(matches) != 1 {
 				t.Fatalf("%q produced no PFR-DEP-002; rules present: %v", tc.spec, ruleIDs(result))
 			}
-			// A shorthand pinned to a full commit is reproducible, so it is
-			// reported for review rather than blocked.
-			want := finding.DecisionBlock
-			if strings.Contains(tc.spec, "#0123456789") {
-				want = finding.DecisionRequireReview
-			}
-			if matches[0].DecisionHint != want {
-				t.Errorf("decision = %q, want %q", matches[0].DecisionHint, want)
+			// docs/analyzers.md blocks when a source is mutable *or* outside
+			// the repository, and a Git dependency is outside it whether or not
+			// the reference is pinned. Only a source that is both immutable and
+			// inside the tree, such as a contained workspace path, reaches
+			// review.
+			if matches[0].DecisionHint != finding.DecisionBlock {
+				t.Errorf("decision = %q, want block", matches[0].DecisionHint)
 			}
 		})
 	}

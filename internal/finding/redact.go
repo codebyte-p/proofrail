@@ -96,6 +96,12 @@ var secretKeyNames = []string{
 	"password",
 	"secret",
 	"token",
+	// An Authorization value is opaque by design: a bearer or basic credential
+	// has no recognizable prefix, so shape detection cannot see it and the key
+	// name is the only signal there is. `proxy_authorization` normalizes to a
+	// string containing this one, so both headers are covered.
+	"authorization",
+	"credential",
 }
 
 // redactSecretAssignments finds `<key><separator><value>` on each line and
@@ -108,35 +114,146 @@ func redactSecretAssignments(s string) string {
 	return strings.Join(lines, "\n")
 }
 
+// redactAssignmentInLine redacts every secret-bearing assignment on one line.
+//
+// Examining only the first separator meant a line whose first key was innocuous
+// carried all of its later values out intact, as in
+// `user=alice, api_key=<secret>`. Each separator is now considered in turn, and
+// a redacted value extends only to the next assignment delimiter so the
+// innocuous fields around it survive.
 func redactAssignmentInLine(line string) string {
-	sep := -1
-	for i := 0; i < len(line); i++ {
+	var b strings.Builder
+	b.Grow(len(line))
+
+	pos := 0
+	for pos < len(line) {
+		sep := indexOfSeparator(line, pos)
+		if sep < 0 {
+			break
+		}
+
+		key := normalizeKeyName(keyBefore(line, pos, sep))
+		valueStart := sep + 1
+		valueEnd := endOfValue(line, valueStart)
+
+		value := line[valueStart:valueEnd]
+		trimmed := strings.TrimLeft(value, " \t")
+
+		switch {
+		case key == "" || !looksSecretBearing(key),
+			strings.TrimSpace(trimmed) == "",
+			valueAlreadyClassified(strings.TrimSpace(trimmed)):
+			b.WriteString(line[pos:valueEnd])
+		default:
+			leading := value[:len(value)-len(trimmed)]
+			b.WriteString(line[pos : sep+1])
+			b.WriteString(leading)
+			b.WriteString("[REDACTED:secret_assignment]")
+		}
+		pos = valueEnd
+	}
+	b.WriteString(line[pos:])
+	return b.String()
+}
+
+// indexOfSeparator returns the next assignment separator at or after start.
+//
+// A separator inside an existing redaction marker is skipped, because the
+// marker's own text would otherwise be read as a key/value pair on a later
+// pass and break idempotence.
+func indexOfSeparator(line string, start int) int {
+	for i := start; i < len(line); i++ {
+		if strings.HasPrefix(line[i:], "[REDACTED:") {
+			end := strings.IndexByte(line[i:], ']')
+			if end < 0 {
+				return -1
+			}
+			i += end
+			continue
+		}
 		if line[i] == '=' || line[i] == ':' {
-			sep = i
+			return i
+		}
+	}
+	return -1
+}
+
+// keyBefore returns the token immediately preceding a separator, which is the
+// key that names the value being assigned.
+func keyBefore(line string, start, sep int) string {
+	begin := start
+	for i := sep - 1; i >= start; i-- {
+		if isValueDelimiter(line[i]) {
+			begin = i + 1
 			break
 		}
 	}
-	if sep < 0 || sep == len(line)-1 {
-		return line
-	}
-
-	key := normalizeKeyName(line[:sep])
-	if key == "" || !looksSecretBearing(key) {
-		return line
-	}
-
-	value := line[sep+1:]
-	trimmed := strings.TrimLeft(value, " \t")
-	if strings.TrimSpace(trimmed) == "" {
-		return line
-	}
-	// Leave an already-redacted value alone so Redact stays idempotent.
-	if strings.HasPrefix(strings.TrimSpace(trimmed), "[REDACTED:") {
-		return line
-	}
-	leading := value[:len(value)-len(trimmed)]
-	return line[:sep+1] + leading + "[REDACTED:secret_assignment]"
+	return line[begin:sep]
 }
+
+// endOfValue returns the index just past the assigned value, which runs to the
+// next delimiter or to the end of the line.
+func endOfValue(line string, start int) int {
+	for i := start; i < len(line); i++ {
+		if isValueDelimiter(line[i]) {
+			return i
+		}
+	}
+	return len(line)
+}
+
+// valueAlreadyClassified reports whether a value has already been redacted by a
+// shape detector, leaving nothing unclassified behind.
+//
+// Shape detection runs first precisely so a recognizable credential is reported
+// with its exact kind, and overwriting that with the generic assignment marker
+// would throw the classification away. `Bearer [REDACTED:jwt]` is therefore left
+// alone, while `[REDACTED:jwt] plus_opaque_residue` is not: anything beyond
+// whitespace and a short alphabetic scheme word is unclassified text that still
+// has to go.
+func valueAlreadyClassified(value string) bool {
+	if !strings.Contains(value, "[REDACTED:") {
+		return false
+	}
+
+	var rest strings.Builder
+	for i := 0; i < len(value); {
+		if strings.HasPrefix(value[i:], "[REDACTED:") {
+			end := strings.IndexByte(value[i:], ']')
+			if end < 0 {
+				break
+			}
+			i += end + 1
+			continue
+		}
+		rest.WriteByte(value[i])
+		i++
+	}
+
+	const maxSchemeWordBytes = 16
+	for _, word := range strings.Fields(rest.String()) {
+		if len(word) > maxSchemeWordBytes || !isAlphabeticWord(word) {
+			return false
+		}
+	}
+	return true
+}
+
+func isAlphabeticWord(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+			continue
+		}
+		return false
+	}
+	return len(s) > 0
+}
+
+// isValueDelimiter reports whether c ends one assignment in a list of them.
+// A space is not a delimiter: `Authorization: Bearer <token>` is a single
+// value whose scheme and credential are separated by one.
+func isValueDelimiter(c byte) bool { return c == ',' || c == ';' }
 
 // normalizeKeyName reduces a key to lowercase letters, digits, and underscores
 // so that `API-KEY`, `"apiKey"`, and `client_secret` all compare alike.

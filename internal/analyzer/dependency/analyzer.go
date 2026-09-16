@@ -136,7 +136,13 @@ func (a analyzer) Analyze(ctx context.Context, in run.AnalysisInput) run.Analyze
 		}
 	}
 
-	for _, candidate := range evaluate(base, head) {
+	// The budget bounds candidate generation, so a hostile manifest cannot drive
+	// every rule over every declaration and pay for a Finalize on each result
+	// before anything is discarded.
+	b := newBudget(in.Limits.MaxFindings)
+	evaluate(base, head, b)
+
+	for _, candidate := range b.items {
 		f, err := finding.Finalize(candidate)
 		if err != nil {
 			diags = append(diags, run.Diagnostic{
@@ -151,14 +157,13 @@ func (a analyzer) Analyze(ctx context.Context, in run.AnalysisInput) run.Analyze
 	finding.Sort(result.Findings)
 
 	// docs/architecture.md caps a run's findings and CLAUDE.md makes any budget
-	// failure yield incomplete and exit code 2, so the ceiling is enforced as a
-	// failure rather than as a silent truncation.
-	if limit := in.Limits.MaxFindings; limit > 0 && len(result.Findings) > limit {
-		result.Findings = result.Findings[:limit]
+	// failure yield incomplete and exit code 2, so hitting the ceiling is a
+	// failure rather than a silent truncation.
+	if b.exceeded {
 		diags = append(diags, run.Diagnostic{
 			Code:    ID + ".finding_budget_exceeded",
 			Path:    ID,
-			Message: "the analyzer produced more findings than the configured ceiling allows",
+			Message: "the analyzer reached the configured finding ceiling and stopped before examining every change",
 		})
 	}
 
@@ -279,6 +284,12 @@ func ecosystemOf(role fileRole) Ecosystem {
 func (ing ingestion) appendNPMManifest(snap *Snapshot, m npm.Manifest) {
 	for _, req := range m.Requirements {
 		kind, immutable := classifyNPMSpec(req.Spec.Value)
+		escapes := kind == SourcePath && pathEscapesRepository(req.Spec.Value, ing.path)
+		// A path or workspace reference that stays inside the repository is
+		// bound to this revision, so it cannot change without a change here.
+		if (kind == SourcePath || kind == SourceWorkspace) && !escapes {
+			immutable = true
+		}
 		snap.Declared = append(snap.Declared, Declared{
 			Ecosystem: EcosystemNPM,
 			Name:      req.Name.Value,
@@ -286,6 +297,7 @@ func (ing ingestion) appendNPMManifest(snap *Snapshot, m npm.Manifest) {
 			Kind:      req.Kind,
 			Source:    kind,
 			Immutable: immutable,
+			Escapes:   escapes,
 			Pinned:    exactNPMVersion(req.Spec.Value),
 			Path:      ing.path,
 			Pos:       Position{Line: req.Name.Pos.Line, Column: req.Name.Pos.Column},
@@ -307,6 +319,9 @@ func (ing ingestion) appendNPMLock(snap *Snapshot, l npm.Lock) {
 		snap.Resolved = append(snap.Resolved, Resolved{
 			Ecosystem: EcosystemNPM,
 			Name:      pkg.Name.Value,
+			// The lockfile key is the install path, which is unique per entry
+			// and is what separates a nested install from a hoisted one.
+			Instance:  pkg.Key.Value,
 			Version:   pkg.Version.Value,
 			Location:  pkg.Resolved.Value,
 			Integrity: pkg.Integrity.Value,
@@ -330,6 +345,10 @@ func (ing ingestion) appendNPMLock(snap *Snapshot, l npm.Lock) {
 func (ing ingestion) appendPythonProject(snap *Snapshot, p python.Project) {
 	for _, req := range p.Requirements {
 		kind, immutable := classifyPythonSpec(req.Spec.Value)
+		escapes := kind == SourcePath && pathEscapesRepository(req.Spec.Value, ing.path)
+		if kind == SourcePath && !escapes {
+			immutable = true
+		}
 		snap.Declared = append(snap.Declared, Declared{
 			Ecosystem: EcosystemPython,
 			Name:      pythonRequirementName(req.Spec.Value),
@@ -337,6 +356,7 @@ func (ing ingestion) appendPythonProject(snap *Snapshot, p python.Project) {
 			Kind:      req.Kind,
 			Source:    kind,
 			Immutable: immutable,
+			Escapes:   escapes,
 			Pinned:    exactPythonVersion(req.Spec.Value),
 			Path:      ing.path,
 			Pos:       Position{Line: req.Spec.Pos.Line, Column: req.Spec.Pos.Column},
@@ -365,6 +385,10 @@ func (ing ingestion) appendPythonProject(snap *Snapshot, p python.Project) {
 		kind, immutable := classifyUVSource(
 			src.Git.Value, src.URL.Value, src.Path.Value,
 			src.Branch.Value, src.Tag.Value, src.Rev.Value)
+		escapes := kind == SourcePath && pathEscapesRepository(src.Path.Value, ing.path)
+		if kind == SourcePath && !escapes {
+			immutable = true
+		}
 		snap.Declared = append(snap.Declared, Declared{
 			Ecosystem: EcosystemPython,
 			Name:      src.Name.Value,
@@ -372,6 +396,7 @@ func (ing ingestion) appendPythonProject(snap *Snapshot, p python.Project) {
 			Kind:      "tool.uv.sources",
 			Source:    kind,
 			Immutable: immutable,
+			Escapes:   escapes,
 			Path:      ing.path,
 			Pos:       Position{Line: src.Name.Pos.Line, Column: src.Name.Pos.Column},
 		})
@@ -392,7 +417,9 @@ func (ing ingestion) appendPythonLock(snap *Snapshot, l python.Lock) {
 		snap.Resolved = append(snap.Resolved, Resolved{
 			Ecosystem: EcosystemPython,
 			Name:      pkg.Name.Value,
-			Version:   pkg.Version.Value,
+			// uv.lock holds one entry per name and version pair.
+			Instance: pkg.Name.Value + "@" + pkg.Version.Value,
+			Version:  pkg.Version.Value,
 			Location: firstNonEmpty(
 				pkg.Registry.Value, pkg.Git.Value, pkg.URL.Value, pkg.Path.Value),
 			Integrity: pkg.Hash.Value,

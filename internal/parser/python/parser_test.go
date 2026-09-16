@@ -1,6 +1,7 @@
 package python_test
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -353,8 +354,73 @@ func TestParseLockCoversEveryArtifactHash(t *testing.T) {
 	if a.Hash.Value == b.Hash.Value {
 		t.Fatalf("substituting the second wheel left the identity unchanged: %q", a.Hash.Value)
 	}
-	if !strings.Contains(a.Hash.Value, "aaaa") || !strings.Contains(a.Hash.Value, "bbbb") {
-		t.Errorf("the identity does not cover every declared wheel: %q", a.Hash.Value)
+	if !strings.HasPrefix(a.Hash.Value, "sha256:") {
+		t.Errorf("identity is not a digest: %q", a.Hash.Value)
+	}
+}
+
+// TestParseLockIdentityNeverDropsATail proves no artifact is omitted however
+// many a package declares.
+//
+// Joining the digests and truncating at a byte budget left everything past the
+// cut out of the identity, so a substitution in a late wheel was invisible in
+// exactly the way taking only the first one had been. Independent re-review
+// finding.
+func TestParseLockIdentityNeverDropsATail(t *testing.T) {
+	const wheelCount = 400
+
+	build := func(lastHash string) string {
+		var b strings.Builder
+		b.WriteString("version = 1\n\n[[package]]\nname = \"requests\"\nversion = \"2.31.0\"\n")
+		b.WriteString("source = { registry = \"https://pypi.org/simple\" }\n")
+		for i := 0; i < wheelCount-1; i++ {
+			b.WriteString("\n[[package.wheels]]\nhash = \"sha256:" + strconv.Itoa(i) + "\"\n")
+		}
+		b.WriteString("\n[[package.wheels]]\nhash = \"" + lastHash + "\"\n")
+		return b.String()
+	}
+
+	first, diags := python.ParseLock("uv.lock", []byte(build("sha256:original")), 10<<20)
+	if len(diags) != 0 {
+		t.Fatalf("expected a clean parse, got %v", codes(diags))
+	}
+	second, diags := python.ParseLock("uv.lock", []byte(build("sha256:substituted")), 10<<20)
+	if len(diags) != 0 {
+		t.Fatalf("expected a clean parse, got %v", codes(diags))
+	}
+
+	a, _ := first.Package("requests")
+	b, _ := second.Package("requests")
+
+	if a.Hash.Value == b.Hash.Value {
+		t.Fatalf("substituting wheel %d of %d left the identity unchanged", wheelCount, wheelCount)
+	}
+	// The identity is a fixed-size digest, so covering every artifact costs
+	// nothing in record size.
+	if len(a.Hash.Value) != len("sha256:")+64 {
+		t.Errorf("identity is not a fixed-size digest: %q", a.Hash.Value)
+	}
+}
+
+// TestParseLockIdentityIsFramed proves two different digest lists cannot fold to
+// the same identity, which length framing is what prevents.
+func TestParseLockIdentityIsFramed(t *testing.T) {
+	build := func(a, b string) string {
+		return "version = 1\n\n[[package]]\nname = \"p\"\nversion = \"1.0.0\"\n" +
+			"\n[[package.wheels]]\nhash = \"" + a + "\"\n" +
+			"\n[[package.wheels]]\nhash = \"" + b + "\"\n"
+	}
+
+	left, _ := python.ParseLock("uv.lock", []byte(build("ab", "c")), 10<<20)
+	right, _ := python.ParseLock("uv.lock", []byte(build("a", "bc")), 10<<20)
+
+	l, okL := left.Package("p")
+	r, okR := right.Package("p")
+	if !okL || !okR {
+		t.Fatal("package missing from one of the locks")
+	}
+	if l.Hash.Value == r.Hash.Value {
+		t.Fatalf("two different digest lists folded to the same identity: %q", l.Hash.Value)
 	}
 }
 

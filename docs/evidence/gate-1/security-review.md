@@ -170,3 +170,35 @@ the finding states, then passed.
   the finding records both readings in its limitations.
 - Severity and confidence for PFR-DEP-001..006 remain the implementer's choice
   and still want an owner ruling, as the PFR-WF table received in Amendment 6.
+
+## PR #1 independent re-review of `e8f0670` — 2026-09-17
+
+Verdict: **REQUEST_CHANGES**. H1-H6 accepted as materially fixed. Six findings
+remained, all now closed with named regression tests.
+
+| # | Finding | Resolution |
+|---|---|---|
+| 1 | `MaxFindings` enforced after generation, Finalize, and Sort | A `budget` is consulted *during* generation: rules check it inside their loops and `evaluate` stops between rules. `TestBudgetBoundsGenerationNotJustOutput` asserts candidates generated, not returned length: 20,000 hostile declarations under a 5-finding ceiling generate at most a handful. |
+| 2 | `recordKey` collapsed same-ecosystem workspaces and duplicate resolved instances | Keys split three ways: `declaredKey` adds the manifest path, `resolvedKey` adds the lockfile path and a per-install `Instance`, and `nameKey` stays coarse for "does this lock resolve this name at all". `resolutionsByName` preserves every instance and its version. |
+| 3 | PFR-DEP-002 used mutable AND outside; containment ignored the manifest | Now mutable **or** outside, per `docs/analyzers.md`. `pathEscapesRepository` takes the declaring manifest and resolves from `path.Dir`, so `../b` from `packages/a/package.json` stays inside while the same text from a root manifest does not. |
+| 4 | uv `artifactIdentity` silently dropped hashes past 2 KiB | Every digest is length-framed and streamed into a SHA-256, so the identity is fixed-size without omitting a tail. Framing keeps `["ab","c"]` and `["a","bc"]` distinct. |
+| 5 | Opaque `Authorization` values not recognized as secret-bearing | `authorization` and `credential` added to the secret key names; `proxy_authorization` normalizes to a superstring of the former. |
+| 6 | Only the first assignment separator per line was examined | Every separator is considered; a redacted value extends to the next `,` or `;` so surrounding fields survive. `valueAlreadyClassified` preserves a precise shape classification such as `[REDACTED:jwt]` rather than overwriting it with the generic marker. |
+
+### Consequence the re-review should note
+
+Finding 3's OR reading means **every Git or URL dependency now blocks, including
+one pinned to a full commit SHA**, because such a source is outside the
+repository whichever way it is pinned. Only a source that is both immutable and
+inside the tree — a contained workspace or local path — reaches review. This
+changed an existing expectation in `TestNPMGitShorthandIsNotTreatedAsRegistry`,
+which previously asserted review for a SHA-pinned shorthand.
+
+### Still awaiting owner input
+
+- **Amendment 5.** The re-review approves it "with the normative wording
+  supplied by the reviewer", but that wording did not accompany the verdict. It
+  is not recorded, so Task 10 stays blocked.
+- **PFR-DEP severity and confidence.** Ruled "as supplied by the reviewer"; the
+  table did not accompany the verdict and is not recorded. Required before
+  Task 13 freezes golden fixtures.

@@ -239,3 +239,86 @@ func TestTruncateExcerptIsIdempotent(t *testing.T) {
 		}
 	}
 }
+
+// TestRedactOpaqueAuthorizationHeader proves an Authorization value is treated
+// as secret-bearing.
+//
+// A bearer token has no recognizable prefix, so shape detection cannot see it
+// and the key name is the only signal there is. Independent review finding.
+func TestRedactOpaqueAuthorizationHeader(t *testing.T) {
+	cases := []struct {
+		name   string
+		line   string
+		secret string
+	}{
+		{"bearer", "Authorization: Bearer qX7pLm2vRt9wYz4aBc8dEf1gHi3jKl5n", "qX7pLm2vRt9wYz4aBc8dEf1gHi3jKl5n"},
+		{"basic", "authorization: Basic dXNlcjpwYXNzd29yZFN1cGVyU2VjcmV0", "dXNlcjpwYXNzd29yZFN1cGVyU2VjcmV0"},
+		{"proxy", "Proxy-Authorization: Bearer opaqueValueWithNoRecognizableShape", "opaqueValueWithNoRecognizableShape"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Redact(tc.line)
+			if strings.Contains(got, tc.secret) {
+				t.Errorf("Redact left an authorization value intact: %q", got)
+			}
+		})
+	}
+}
+
+// TestRedactEveryAssignmentOnALine proves a secret assignment is found even when
+// an unrelated assignment precedes it.
+//
+// Only the first separator on a line was examined, so a line whose first key was
+// innocuous carried every later value out unredacted. Independent review
+// finding.
+func TestRedactEveryAssignmentOnALine(t *testing.T) {
+	cases := []struct {
+		name    string
+		line    string
+		secret  string
+		survive string
+	}{
+		{
+			name:    "comma separated",
+			line:    "user=alice, api_key=s3cr3topaquevalue, region=eu",
+			secret:  "s3cr3topaquevalue",
+			survive: "alice",
+		},
+		{
+			name:    "semicolon separated",
+			line:    "host: example.com; password: hunter2opaquesecret",
+			secret:  "hunter2opaquesecret",
+			survive: "example.com",
+		},
+		{
+			name:    "two secrets after an innocuous key",
+			line:    "name=svc, token=firstopaquesecret, secret=secondopaquesecret",
+			secret:  "firstopaquesecret",
+			survive: "svc",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Redact(tc.line)
+			if strings.Contains(got, tc.secret) {
+				t.Errorf("Redact left a later secret assignment intact: %q", got)
+			}
+			if !strings.Contains(got, tc.survive) {
+				t.Errorf("Redact removed an innocuous value it should keep: %q", got)
+			}
+		})
+	}
+}
+
+// TestRedactEveryAssignmentIsIdempotent keeps the multi-assignment rewrite from
+// re-redacting its own markers, which evidence relies on because it can pass
+// through redaction more than once.
+func TestRedactEveryAssignmentIsIdempotent(t *testing.T) {
+	const line = "user=alice, api_key=s3cr3topaquevalue, secret=another0paqueValue"
+	once := Redact(line)
+	if twice := Redact(once); twice != once {
+		t.Fatalf("Redact is not idempotent:\n once: %q\ntwice: %q", once, twice)
+	}
+}
