@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -651,5 +652,165 @@ func installHook(t *testing.T, hooksDir, name, marker string) {
 	body := "#!/bin/sh\necho executed > '" + marker + "'\n"
 	if err := os.WriteFile(filepath.Join(hooksDir, name), []byte(body), 0o755); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Resource bounds must hold before memory is allocated, not after
+// ---------------------------------------------------------------------------
+
+func TestLoadRejectsASingleObjectLargerThanTheContentLimit(t *testing.T) {
+	// A hostile pull request needs only one very large file. If the limit is
+	// checked while parsing output that has already been buffered in full, the
+	// whole object is resident in memory before the limit is ever consulted, and
+	// the process dies by OOM instead of returning a controlled incomplete.
+	dir := newRepo(t)
+	writeFile(t, dir, "seed.txt", "seed\n")
+	base := commit(t, dir, "base")
+	writeFile(t, dir, "huge.bin", strings.Repeat("A", 4<<20)) // 4 MiB
+	head := commit(t, dir, "head")
+
+	limits := DefaultLimits()
+	limits.MaxChangedContentBytes = 64 << 10 // 64 KiB
+
+	le := loadErr(t, Request{
+		RepoPath: dir, Repository: "acme/demo",
+		BaseSHA: base, HeadSHA: head, Limits: limits,
+	})
+	if le.Code != "limit.changed_content_exceeded" {
+		t.Fatalf("code = %q, want limit.changed_content_exceeded", le.Code)
+	}
+}
+
+func TestLoadStopsReadingOnceTheContentLimitIsReached(t *testing.T) {
+	// The bound must be enforced against bytes actually read, so the peak memory
+	// of a load stays proportional to the limit rather than to whatever the
+	// repository contains.
+	dir := newRepo(t)
+	writeFile(t, dir, "seed.txt", "seed\n")
+	base := commit(t, dir, "base")
+	for i := 0; i < 8; i++ {
+		writeFile(t, dir, "blob"+strconv.Itoa(i)+".bin", strings.Repeat(string(rune('a'+i)), 512<<10))
+	}
+	head := commit(t, dir, "head")
+
+	limits := DefaultLimits()
+	limits.MaxChangedContentBytes = 256 << 10
+
+	le := loadErr(t, Request{
+		RepoPath: dir, Repository: "acme/demo",
+		BaseSHA: base, HeadSHA: head, Limits: limits,
+	})
+	if le.Code != "limit.changed_content_exceeded" {
+		t.Fatalf("code = %q, want limit.changed_content_exceeded", le.Code)
+	}
+}
+
+func TestLoadRejectsAChangedFileCountFarAboveTheLimit(t *testing.T) {
+	// The file-count limit must also be reached without first materializing the
+	// complete raw-diff output for an arbitrarily large commit.
+	dir := newRepo(t)
+	writeFile(t, dir, "seed.txt", "seed\n")
+	base := commit(t, dir, "base")
+	for i := 0; i < 400; i++ {
+		writeFile(t, dir, "gen/f"+strconv.Itoa(i)+".txt", "x\n")
+	}
+	head := commit(t, dir, "head")
+
+	limits := DefaultLimits()
+	limits.MaxChangedFiles = 10
+
+	le := loadErr(t, Request{
+		RepoPath: dir, Repository: "acme/demo",
+		BaseSHA: base, HeadSHA: head, Limits: limits,
+	})
+	if le.Code != "limit.changed_files_exceeded" {
+		t.Fatalf("code = %q, want limit.changed_files_exceeded", le.Code)
+	}
+}
+
+func TestLoadCountsDuplicateContentOncePerFile(t *testing.T) {
+	// Git content-addresses identical files to one blob. Counting that blob once
+	// against the aggregate budget while handing every file a copy would let a
+	// pull request present far more analysis surface than the limit allows.
+	dir := newRepo(t)
+	writeFile(t, dir, "seed.txt", "seed\n")
+	base := commit(t, dir, "base")
+
+	identical := strings.Repeat("d", 64<<10)
+	for i := 0; i < 6; i++ {
+		writeFile(t, dir, "dup"+strconv.Itoa(i)+".txt", identical)
+	}
+	head := commit(t, dir, "head")
+
+	limits := DefaultLimits()
+	limits.MaxChangedContentBytes = 200 << 10 // below 6 x 64 KiB
+
+	le := loadErr(t, Request{
+		RepoPath: dir, Repository: "acme/demo",
+		BaseSHA: base, HeadSHA: head, Limits: limits,
+	})
+	if le.Code != "limit.changed_content_exceeded" {
+		t.Fatalf("code = %q, want limit.changed_content_exceeded", le.Code)
+	}
+}
+
+func TestLoadNeverReadsMoreObjectBytesThanTheLimitAllows(t *testing.T) {
+	// The limit must bound what the loader READS, not merely what it reports.
+	// A repository chooses how much output Git produces, so buffering the whole
+	// stream and checking the total afterwards means a single very large file is
+	// already resident in memory before any limit is consulted -- an OOM kill
+	// instead of the controlled incomplete the architecture requires.
+	dir := newRepo(t)
+	writeFile(t, dir, "seed.txt", "seed\n")
+	base := commit(t, dir, "base")
+	const huge = 32 << 20 // far above the limit used below
+	writeFile(t, dir, "huge.bin", strings.Repeat("A", huge))
+	head := commit(t, dir, "head")
+
+	limits := DefaultLimits()
+	limits.MaxChangedContentBytes = 64 << 10
+
+	loader, err := NewGitLoader()
+	if err != nil {
+		t.Skipf("git loader unavailable: %v", err)
+	}
+
+	// A generous budget: well above what streaming needs, far below the file.
+	const allocationBudget = huge / 4
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+
+	_, err = loader.Load(context.Background(), Request{
+		RepoPath: dir, Repository: "acme/demo",
+		BaseSHA: base, HeadSHA: head, Limits: limits,
+	})
+
+	runtime.ReadMemStats(&after)
+
+	if err == nil {
+		t.Fatal("the load must fail")
+	}
+	var le *LoadError
+	if !errors.As(err, &le) || le.Code != "limit.changed_content_exceeded" {
+		t.Fatalf("error = %v, want limit.changed_content_exceeded", err)
+	}
+
+	if got := loader.BlobBytesRead(); got > limits.MaxChangedContentBytes {
+		t.Fatalf("loader retained %d object bytes with a %d byte limit; "+
+			"the limit must be enforced before the object is read", got, limits.MaxChangedContentBytes)
+	}
+
+	// Retained bytes alone would not catch this: the defect was upstream of the
+	// per-object check, in buffering the whole of git's stdout before parsing
+	// any of it. Total allocation is what distinguishes streaming from
+	// buffer-then-check.
+	allocated := int64(after.TotalAlloc - before.TotalAlloc)
+	if allocated > allocationBudget {
+		t.Fatalf("the load allocated %d bytes for an %d byte file under a %d byte limit; "+
+			"git output must be consumed as a bounded stream, not buffered whole",
+			allocated, huge, limits.MaxChangedContentBytes)
 	}
 }
