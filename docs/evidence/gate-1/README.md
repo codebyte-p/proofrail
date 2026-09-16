@@ -53,7 +53,7 @@ A task counts as done only when its focused tests, `go test ./...`, and
 | 2 | Safe paths and immutable Git revision binding | `feat/gate1-gitdiff` | done |
 | 3 | Findings, redaction, ordering, fingerprints | `feat/gate1-findings` | done |
 | 4 | Bounded workflow parser and PFR-WF analyzer | `feat/gate1-workflow` | done |
-| 5 | npm/Python parsing and PFR-DEP analyzer | — | not started |
+| 5 | npm/Python parsing and PFR-DEP analyzer | `feat/gate1-workflow` | done |
 | 6 | PFR-DIFF security-sensitive classifier | — | not started |
 | 7 | Embedded schemas and restricted policy parsing | — | not started |
 | 8 | Non-Turing-complete policy evaluator | — | not started |

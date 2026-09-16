@@ -451,25 +451,25 @@ Commit: `feat: detect unsafe github workflow changes`
 - Python parser accepts `pyproject.toml` up to 1 MiB and `uv.lock` up to 10 MiB.
 - Analyzer ID is `dependency`; implements PFR-DEP-001 through PFR-DEP-006.
 
-- [ ] **Step 1: Write failing bounded parser tests**
+- [x] **Step 1: Write failing bounded parser tests**
 
 Test duplicate JSON keys with a token-stream pre-pass, JSON/TOML nesting above 64, invalid UTF-8, oversized files, manifest/lock mismatch, renamed/deleted pairs, and unsupported lockfiles. Unsupported optional managers produce explicit coverage notes; required npm/uv parse failures produce diagnostics that make the run incomplete.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `go test ./internal/parser/npm ./internal/parser/python -v`
 
 Expected: compile failure for missing parser functions.
 
-- [ ] **Step 3: Implement normalized dependency records**
+- [x] **Step 3: Implement normalized dependency records**
 
 Emit package name, normalized version requirement, resolved version, source type, integrity identity, lifecycle/install behavior, direct/transitive role, and source file/line when available. Never invoke npm, Python, uv, package hooks, or registry clients.
 
-- [ ] **Step 4: Write failing PFR-DEP rule tests**
+- [x] **Step 4: Write failing PFR-DEP rule tests**
 
 Cover all six rules. Mark PFR-DEP-001 and PFR-DEP-004 malicious fixtures as `must_detect`. Prove suspicious-name similarity remains warn-only and cannot block without a separate rule.
 
-- [ ] **Step 5: Implement, fuzz, verify, and commit**
+- [x] **Step 5: Implement, fuzz, verify, and commit**
 
 Use bounded standard-library JSON parsing and a reviewed TOML parser only if the dependency ledger approves it; otherwise implement the narrow `pyproject.toml` and `uv.lock` field reader needed by the normalized contract. Fuzz at least 200 seeded manifest/lock mutations.
 

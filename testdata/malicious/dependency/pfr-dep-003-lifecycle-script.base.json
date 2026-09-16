@@ -1,0 +1,6 @@
+{
+  "name": "example",
+  "scripts": {
+    "test": "node ./scripts/test.js"
+  }
+}
