@@ -1,0 +1,5 @@
+# Fixtures the Gate 1 plan marks must_detect, one `<rule> <fixture>` per line.
+# Task 5 Step 4 requires PFR-DEP-001 and PFR-DEP-004 to be labeled. JSON has no
+# comment syntax, so the label lives here rather than inside the parsed content.
+PFR-DEP-001 pfr-dep-001-manifest-lock-mismatch.head.json
+PFR-DEP-004 pfr-dep-004-source-changed.head.json

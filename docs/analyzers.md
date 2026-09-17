@@ -41,6 +41,27 @@ Detect pull-request changes that create common GitHub Actions privilege and supp
 | `PFR-WF-005` secrets exposed to untrusted execution | Secret-bearing job or environment combined with PR-controlled code execution | Block |
 | `PFR-WF-006` persistence on self-hosted runner | Untrusted PR job targets `self-hosted` without an approved ephemeral-runner policy | Require review |
 
+### Default classification
+
+Owner-approved on 2026-09-16. These are the defaults each rule emits; policy may
+route them differently, but an analyzer may not exceed them.
+
+| Rule | Severity | Confidence |
+|---|---|---|
+| `PFR-WF-001` | high | high |
+| `PFR-WF-002` | high | medium |
+| `PFR-WF-003` | medium | high |
+| `PFR-WF-004` | high | high when directly reachable from an untrusted trigger, medium when reachability is uncertain |
+| `PFR-WF-005` | high | high |
+| `PFR-WF-006` | high | medium |
+
+**Critical severity is reserved.** A rule may claim `critical` only on evidence
+proving exposure of write-capable or equivalently critical authority. Observing
+that a hazardous pattern is present is not such proof, so no version 1 PFR-WF
+rule emits `critical`. Confidence never raises severity: per the threat model it
+exists so policy can route weak evidence to review, not so strong evidence can
+escalate impact.
+
 ### Example
 
 ```yaml
@@ -86,14 +107,21 @@ Adding an ecosystem requires parser fixtures, a lock-integrity model, and a sepa
 
 ### Initial rules
 
-| Rule | Evidence | Default decision |
-|---|---|---|
-| `PFR-DEP-001` manifest-lock mismatch | Dependency declaration changes without corresponding lock resolution, or inconsistent resolved identity | Block |
-| `PFR-DEP-002` non-registry dependency | New Git, URL, local path, workspace escape, or unpinned source dependency | Require review; block if mutable or outside repository |
-| `PFR-DEP-003` lifecycle execution introduced | New or changed package lifecycle script, install hook, build backend, or plugin with install-time execution potential | Require review |
-| `PFR-DEP-004` resolved source changed unexpectedly | Name/version unchanged but lockfile source URL, integrity value, or commit identity changes | Block |
-| `PFR-DEP-005` dependency graph expansion | New direct dependency and transitive-count delta with exact manifest and lock evidence | Observe or require review by threshold |
-| `PFR-DEP-006` suspicious name similarity | New direct dependency closely resembles an existing or allow-listed package | Warn only in version 1 |
+| Rule | Evidence | Default severity | Default confidence | Default decision |
+|---|---|---|---|---|
+| `PFR-DEP-001` manifest-lock mismatch | Dependency declaration changes without corresponding lock resolution, or inconsistent resolved identity | High | High | Block |
+| `PFR-DEP-002` non-registry dependency | New Git, URL, local path, workspace escape, or unpinned source dependency | Medium for an immutable in-repository source; high when mutable or outside the repository | High | Require review for an immutable in-repository source; block when mutable or outside the repository |
+| `PFR-DEP-003` lifecycle execution introduced | New or changed package lifecycle script, install hook, build backend, or plugin with install-time execution potential | Medium | High | Require review |
+| `PFR-DEP-004` resolved source changed unexpectedly | Name/version unchanged but lockfile source URL, integrity value, or commit identity changes | High | High | Block |
+| `PFR-DEP-005` dependency graph expansion | New direct dependency and transitive-count delta with exact manifest and lock evidence | Note below the review threshold; low at or above it | High | Observe below the threshold; require review at or above it |
+| `PFR-DEP-006` suspicious name similarity | New direct dependency closely resembles an existing or allow-listed package | Low | Low | Warn only in version 1 |
+
+These values are normative for version 1 and for Task 13 golden fixtures. The
+PFR-DEP-005 review threshold is three newly declared direct dependencies. A Git
+or URL source is outside the repository even when pinned to an immutable commit,
+so PFR-DEP-002 blocks it under the "mutable or outside" contract. Critical
+severity remains reserved for evidence proving exposure of write-capable or
+equivalently critical authority.
 
 ### Example
 

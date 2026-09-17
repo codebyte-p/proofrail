@@ -1,0 +1,10 @@
+# Compensating control: untrusted code runs on an ephemeral GitHub-hosted
+# runner that is destroyed after the job.
+name: integration
+on: pull_request
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - run: make integration

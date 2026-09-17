@@ -1,0 +1,10 @@
+# must_detect: PFR-WF-004
+# The pull request title is interpolated straight into a shell command, so a
+# title containing shell metacharacters executes on the runner.
+name: greet
+on: pull_request_target
+jobs:
+  greet:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Thanks for ${{ github.event.pull_request.title }}"

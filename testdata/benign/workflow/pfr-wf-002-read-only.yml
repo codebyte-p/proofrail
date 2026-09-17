@@ -1,0 +1,10 @@
+# Compensating control: the workflow token is narrowed, not widened.
+name: build
+on: push
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make build

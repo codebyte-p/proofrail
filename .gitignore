@@ -20,3 +20,16 @@ coverage/
 __pycache__/
 *.py[cod]
 
+
+# Go build and test output
+/proofrail
+/proofrail.exe
+/cmd/proofrail/proofrail
+/cmd/proofrail/proofrail.exe
+*.test
+*.test.exe
+*.out
+/vendor/
+
+# Local-only Claude Code configuration
+.claude/settings.local.json

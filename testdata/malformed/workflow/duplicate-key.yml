@@ -1,0 +1,10 @@
+# Rejected by the parser: the trigger is declared twice, so a reviewer and the
+# runner can disagree about which one is in effect.
+name: ci
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make test
+on: pull_request_target
