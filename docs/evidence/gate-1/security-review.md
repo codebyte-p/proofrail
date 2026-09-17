@@ -194,11 +194,32 @@ inside the tree — a contained workspace or local path — reaches review. This
 changed an existing expectation in `TestNPMGitShorthandIsNotTreatedAsRegistry`,
 which previously asserted review for a SHA-pinned shorthand.
 
-### Still awaiting owner input
+### Items unresolved at the time of re-review
 
-- **Amendment 5.** The re-review approves it "with the normative wording
-  supplied by the reviewer", but that wording did not accompany the verdict. It
-  is not recorded, so Task 10 stays blocked.
-- **PFR-DEP severity and confidence.** Ruled "as supplied by the reviewer"; the
-  table did not accompany the verdict and is not recorded. Required before
-  Task 13 freezes golden fixtures.
+- **Amendment 5.** At the time of re-review, the approved normative wording did
+  not accompany the verdict. The owner disposition below now records it and
+  unblocks Task 10.
+- **PFR-DEP severity and confidence.** At the time of re-review, the ruled table
+  did not accompany the verdict. The owner disposition below now records it for
+  Task 13 golden fixtures.
+
+## Owner contract disposition — 2026-09-17
+
+The repository owner closed both documentation items after the implementation
+and review findings were remediated:
+
+- **Amendment 5 approved.** `Scanner.Scan` returns
+  `(CanonicalRunResult, Telemetry)`. Telemetry holds per-analyzer and whole-run
+  duration only as operational data; it is excluded from canonical JSON, the
+  integrity digest, checks, Markdown, and SARIF. Context deadlines enforce the
+  analyzer and run budgets. Telemetry cannot influence status, decision,
+  completion, or exit code. Task 10 is no longer blocked by this amendment.
+- **PFR-DEP classifications approved.** The complete severity, confidence, and
+  decision table in `docs/analyzers.md` is normative for version 1 and for Task
+  13 golden fixtures. Dynamic rows preserve both branches: PFR-DEP-002 rises
+  from medium/high/require-review to high/high/block when mutable or outside
+  the repository, and PFR-DEP-005 rises from note/high/observe to
+  low/high/require-review at three newly declared direct dependencies.
+
+This disposition does not change the independent verdict on the remediation
+code. PR #1 remains unmerged and still requires another non-authoring review.

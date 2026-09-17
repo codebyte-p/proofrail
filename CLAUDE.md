@@ -141,4 +141,4 @@ Diagnostic locators are `<file>#<pointer>`, e.g. `.github/workflows/ci.yml#jobs.
 
 ## Current state
 
-Tasks 1–5 complete; Task 6 (PFR-DIFF) is next. Amendments 1, 3, 4, 6 accepted; 2 is historical context only. **Amendment 5 blocks Task 10** — its Task 10 contract wording is unreconciled; see the open question in the Gate 1 plan.
+Tasks 1–5 complete; Task 6 (PFR-DIFF) is next. Amendments 1 and 3–7 are accepted; Amendment 2 is historical context only. Amendment 5 defines `Scanner.Scan` as returning `(CanonicalRunResult, Telemetry)`, keeps telemetry outside every canonical projection, and no longer blocks Task 10. PR #1 remains unmerged pending another independent non-authoring review.

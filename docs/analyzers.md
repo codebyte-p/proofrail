@@ -107,14 +107,21 @@ Adding an ecosystem requires parser fixtures, a lock-integrity model, and a sepa
 
 ### Initial rules
 
-| Rule | Evidence | Default decision |
-|---|---|---|
-| `PFR-DEP-001` manifest-lock mismatch | Dependency declaration changes without corresponding lock resolution, or inconsistent resolved identity | Block |
-| `PFR-DEP-002` non-registry dependency | New Git, URL, local path, workspace escape, or unpinned source dependency | Require review; block if mutable or outside repository |
-| `PFR-DEP-003` lifecycle execution introduced | New or changed package lifecycle script, install hook, build backend, or plugin with install-time execution potential | Require review |
-| `PFR-DEP-004` resolved source changed unexpectedly | Name/version unchanged but lockfile source URL, integrity value, or commit identity changes | Block |
-| `PFR-DEP-005` dependency graph expansion | New direct dependency and transitive-count delta with exact manifest and lock evidence | Observe or require review by threshold |
-| `PFR-DEP-006` suspicious name similarity | New direct dependency closely resembles an existing or allow-listed package | Warn only in version 1 |
+| Rule | Evidence | Default severity | Default confidence | Default decision |
+|---|---|---|---|---|
+| `PFR-DEP-001` manifest-lock mismatch | Dependency declaration changes without corresponding lock resolution, or inconsistent resolved identity | High | High | Block |
+| `PFR-DEP-002` non-registry dependency | New Git, URL, local path, workspace escape, or unpinned source dependency | Medium for an immutable in-repository source; high when mutable or outside the repository | High | Require review for an immutable in-repository source; block when mutable or outside the repository |
+| `PFR-DEP-003` lifecycle execution introduced | New or changed package lifecycle script, install hook, build backend, or plugin with install-time execution potential | Medium | High | Require review |
+| `PFR-DEP-004` resolved source changed unexpectedly | Name/version unchanged but lockfile source URL, integrity value, or commit identity changes | High | High | Block |
+| `PFR-DEP-005` dependency graph expansion | New direct dependency and transitive-count delta with exact manifest and lock evidence | Note below the review threshold; low at or above it | High | Observe below the threshold; require review at or above it |
+| `PFR-DEP-006` suspicious name similarity | New direct dependency closely resembles an existing or allow-listed package | Low | Low | Warn only in version 1 |
+
+These values are normative for version 1 and for Task 13 golden fixtures. The
+PFR-DEP-005 review threshold is three newly declared direct dependencies. A Git
+or URL source is outside the repository even when pinned to an immutable commit,
+so PFR-DEP-002 blocks it under the "mutable or outside" contract. Critical
+severity remains reserved for evidence proving exposure of write-capable or
+equivalently critical authority.
 
 ### Example
 

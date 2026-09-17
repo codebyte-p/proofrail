@@ -56,7 +56,7 @@ func Finalize(Finding) (Finding, error)
 // internal/run/model.go
 type Analyzer interface { ID() string; Analyze(context.Context, AnalysisInput) AnalyzerResult }
 type AnalysisInput struct { Identity RunIdentity; Changes gitdiff.ChangeSet; Policy []byte; Waivers []byte; Limits Limits }
-type Scanner interface { Scan(context.Context, ScanRequest) CanonicalRunResult }
+type Scanner interface { Scan(context.Context, ScanRequest) (CanonicalRunResult, Telemetry) }
 func ExitCode(CanonicalRunResult) int
 ```
 
@@ -158,7 +158,9 @@ the independent reviewer and the repository owner accept it.
 
 ### Amendment 5: operational timing lives outside the canonical result
 
-- **Status:** **Concept approved by the repository owner on 2026-09-16. Contract wording NOT approved.** The Task 4 change below is approved and shipped. The Task 10 delivery mechanism is unsettled and is recorded as an open question at the end of this amendment. **Task 10 may not start until that question is closed.**
+- **Status:** **Approved by the repository owner on 2026-09-17.** The normative
+  Task 10 contract below supersedes the former single-value `Scanner.Scan`
+  signature and closes the reconciliation item. **Task 10 is unblocked.**
 - **Conflict.** Task 1 gave `AnalyzerResult` a `DurationNanos int64` field
   serialized as `duration_ns`, and Task 4 filled it with `time.Since(start)`.
   `CanonicalRunResult` embeds `[]AnalyzerResult`, so a wall-clock reading became
@@ -173,9 +175,11 @@ the independent reviewer and the repository owner accept it.
   - `AnalyzerResult.DurationNanos` is deleted. `AnalyzerResult` now holds only
     values derived from its bound inputs, and analyzers do not read a clock.
   - Wall-clock measurement becomes the orchestrator's job. Task 10 introduces a
-    `run.Telemetry` value holding per-analyzer and whole-run durations, returned
-    alongside `CanonicalRunResult` rather than inside it, and carrying no field
-    that appears in the canonical schema.
+    `run.Telemetry` value holding per-analyzer and whole-run durations. The
+    scanner returns it as the second value from
+    `Scan(context.Context, ScanRequest) (CanonicalRunResult, Telemetry)`; it is
+    not embedded in `CanonicalRunResult` and has no field in the canonical
+    schema.
   - Telemetry may reach the console, logs, and the hosted control plane. It may
     never reach canonical JSON, the integrity digest, checks output, Markdown, or
     SARIF, because those are projections of the canonical result.
@@ -189,40 +193,24 @@ the independent reviewer and the repository owner accept it.
   code, or ordering rule changes. The `Limits` recorded in the canonical result
   still state the bounds the run was produced under.
 
-#### Open question: how Task 10 delivers telemetry (blocks Task 10)
+#### Normative Task 10 telemetry contract
 
-The phrase "returned alongside `CanonicalRunResult`" is not implementable as
-written, and it collides with two pinned statements elsewhere in this plan.
-Both must be settled before Task 10 starts.
-
-1. **The `Scanner` signature returns one value.** The contract block pins
-   `type Scanner interface { Scan(context.Context, ScanRequest) CanonicalRunResult }`.
-   A single return value cannot carry telemetry alongside the result, so
-   Amendment 5 silently requires changing a pinned contract without saying so.
-2. **Task 10 Step 1 still requires duration in the ledger.** It reads "the
-   ledger records duration/budget/failure without secrets". The ledger is
-   `AnalyzerResult`, whose duration field Amendment 5 deletes. The step text and
-   the amendment cannot both stand.
-
-Candidate resolutions for (1), for owner decision:
-
-- **A (recommended).** Widen the contract to
-  `Scan(context.Context, ScanRequest) (CanonicalRunResult, Telemetry)`. The two
-  values are distinct types, so no reporter can reach telemetry through the
-  canonical result, and `ExitCode(CanonicalRunResult) int` is unaffected. Cost:
-  one pinned signature changes, which is what this question exists to authorize.
-- **B.** Pass a telemetry sink in `ScanRequest` and keep `Scan` as pinned.
-  **Not recommended:** a sink is a callback, and `CLAUDE.md` forbids adding
-  callbacks. Choosing B would need that invariant revisited first.
-- **C.** Return a wrapper struct holding both values. Equivalent to A in effect
-  but changes the return type rather than adding to it, so every later reference
-  to `CanonicalRunResult` as the return of `Scan` would need rewording.
-
-Proposed resolution for (2): reword Task 10 Step 1 to "the ledger records
-budget and failure without secrets, and telemetry records duration". This keeps
-the fault-matrix obligation intact while moving only the duration clause.
-
-Neither resolution is applied yet. This subsection is the reconciliation item.
+1. `Scanner.Scan` returns two distinct values:
+   `Scan(context.Context, ScanRequest) (CanonicalRunResult, Telemetry)`.
+   `ExitCode` continues to accept only `CanonicalRunResult`.
+2. `AnalyzerResult` and the canonical completion ledger contain budget usage
+   and redacted failure diagnostics, but no operational duration. `Telemetry`
+   contains per-analyzer and whole-run durations.
+3. `Telemetry` is operational data only. It may reach the console, diagnostic
+   logs, benchmarks, and the hosted control plane, but it may not be serialized
+   into canonical JSON or included in the integrity digest, checks output,
+   Markdown, or SARIF.
+4. The 30-second analyzer and 120-second run budgets are enforced through
+   orchestrator-owned context deadlines. Telemetry is observational and cannot
+   determine status, decision, completion, or exit code.
+5. Task 10 tests must prove that the ledger records budget and failure without
+   secrets, telemetry records duration, and repeated scans with identical bound
+   inputs produce byte-identical canonical results regardless of measured time.
 
 ### Amendment 6: PFR-WF default classification is owner-set, and critical is reserved
 
@@ -246,6 +234,28 @@ Neither resolution is applied yet. This subsection is the reconciliation item.
   moves as a result of this amendment. Severity order and the rule that
   confidence never raises impact are untouched. `TestNoRuleClaimsCriticalSeverity`
   enforces the reservation in code rather than leaving it as prose.
+
+### Amendment 7: PFR-DEP default classification is owner-set
+
+- **Status:** **Approved by the repository owner on 2026-09-17.** The normative
+  table lives in `docs/analyzers.md` and must be used by Task 13 golden fixtures.
+- **Conflict.** Task 5 required tests to pin severity, confidence, and decision,
+  but the analyzer contract supplied only the decision. The implementation's
+  provisional classifications therefore became load-bearing without an owner
+  ruling, and Task 13 could not freeze truthful golden fixtures.
+- **Change.** The owner approved the implemented defaults:
+  `PFR-DEP-001` high/high/block; `PFR-DEP-002` medium/high/require-review for an
+  immutable in-repository source and high/high/block when the source is mutable
+  or outside the repository; `PFR-DEP-003` medium/high/require-review;
+  `PFR-DEP-004` high/high/block; `PFR-DEP-005` note/high/observe below the
+  review threshold and low/high/require-review at or above it; and
+  `PFR-DEP-006` low/low/warn. The analyzer contract is the single normative
+  table so prose, tests, and Task 13 fixtures cannot drift independently.
+- **Invariants preserved.** PFR-DEP-006 remains warn-only. Critical severity
+  remains reserved for evidence proving exposure of write-capable or
+  equivalently critical authority. No completed evidence is discarded when a
+  different input fails, and any required failure still makes the run
+  `incomplete` with exit code `2`.
 
 ---
 
@@ -623,7 +633,7 @@ Commit: `feat: enforce exact expiring waivers`
 
 - [ ] **Step 1: Write failing orchestration tests**
 
-Use simple fakes to prove analyzers run in stable ID order, each gets at most 30 seconds, the run gets at most 120 seconds, completed evidence survives a later failure, and the ledger records duration/budget/failure without secrets.
+Use simple fakes to prove analyzers run in stable ID order, each gets at most 30 seconds, the run gets at most 120 seconds, completed evidence survives a later failure, the ledger records budget and failure without secrets, telemetry records duration, and measured time cannot change canonical bytes.
 
 - [ ] **Step 2: Write failing fault matrix**
 

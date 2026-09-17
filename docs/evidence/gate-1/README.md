@@ -38,7 +38,7 @@ redaction limits, or non-synthetic repository identifiers.
 | 7 | P95 below 60 seconds for 5,000 changed lines and 100 changed supported files | `benchmarks/results.json` | pending |
 | 8 | No network request during analysis, verified in an isolated environment | `tests/summary.json` | pending |
 | 9 | Policy evaluation satisfies the ADR 0001 operator, termination, adversarial-policy, fixed-clock, waiver-containment, fuzz, and fault-injection obligations | `tests/summary.json` | pending |
-| 10 | Independent security review of parser, path, policy, redaction, and atomic-output boundaries | `security-review.md` | partial (git, path, redaction reviewed; PR #1 independent review returned REQUEST_CHANGES with 6 high and 8 medium findings, all 14 now fixed with regression tests; re-review outstanding) |
+| 10 | Independent security review of parser, path, policy, redaction, and atomic-output boundaries | `security-review.md` | partial (PR #1 review found 14 issues and re-review found 6 more; all 20 have remediation commits and regression coverage, but another independent verdict is still required) |
 | 11 | Shadow-mode pilot on ProofRail and at least two authorized public repositories | `promotion.md` | pending |
 
 ## Task ledger
@@ -63,10 +63,11 @@ A task counts as done only when its focused tests, `go test ./...`, and
 | 12 | CLI command and end-to-end offline scan | — | not started |
 | 13 | Corpus, adversarial campaign, benchmarks, promotion evidence | — | not started |
 
-## Plan amendments awaiting review
+## Plan amendments
 
-All six amendments are recorded in full in the Gate 1 plan. Gate 1 cannot close
-while any of them is unreviewed.
+All seven amendments are recorded in full in the Gate 1 plan. Amendments 1 and
+3–7 are owner-approved; Amendment 2 is retained as accepted historical context
+only.
 
 | # | Summary | State |
 |---|---|---|
@@ -74,8 +75,9 @@ while any of them is unreviewed.
 | 2 | `AnalyzerResult` gains its `Findings` field in Task 10 rather than Task 1. | **accepted 2026-09-16 as historical context only**; superseded by Amendment 4 on when `Findings` appears and by Amendment 5 on the `duration` field it describes |
 | 3 | `internal/gitdiff` defines its own narrow `Limits` instead of importing `run.Limits`, because `internal/run` must import `internal/gitdiff` for `AnalysisInput.Changes`. | **accepted 2026-09-16** |
 | 4 | `AnalyzerResult.Findings` arrives in Task 4 rather than Task 10, because the PFR-WF analyzer test is the first test that requires the field. | **accepted 2026-09-16** |
-| 5 | Operational timing is telemetry: `AnalyzerResult.DurationNanos` is deleted, analyzers read no clock, and the orchestrator collects durations outside `CanonicalRunResult`. | **concept accepted 2026-09-16; contract wording not accepted.** The Task 4 change is shipped. The Task 10 delivery mechanism conflicts with the pinned single-value `Scanner.Scan` signature and with Task 10 Step 1's "ledger records duration" clause. **Blocks Task 10**; see the open question in the plan. |
+| 5 | Operational timing is telemetry: `AnalyzerResult.DurationNanos` is deleted, analyzers read no clock, and `Scanner.Scan` returns `(CanonicalRunResult, Telemetry)` as two distinct values. Telemetry is excluded from canonical JSON and every canonical projection. | **approved 2026-09-17; Task 10 unblocked** |
 | 6 | The owner set the PFR-WF default severity and confidence table, normative in `docs/analyzers.md`, and reserved `critical` for evidence proving exposure of write-capable or equivalently critical authority. | **approved 2026-09-16** |
+| 7 | The owner set the PFR-DEP default severity, confidence, and decision table, normative in `docs/analyzers.md` and required by Task 13 golden fixtures. | **approved 2026-09-17** |
 
 ## Dependency additions
 
