@@ -1,0 +1,6 @@
+[project]
+name = "example"
+version = "1.0.0"
+dependencies = [
+    "internal-tool @ git+https://example.invalid/team/tool.git@main",
+]

@@ -1,0 +1,12 @@
+# Compensating control: the untrusted value reaches the shell through an
+# environment variable, so it is never expanded by the expression evaluator
+# into the script text.
+name: greet
+on: pull_request_target
+jobs:
+  greet:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Thanks for $PR_TITLE"
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}

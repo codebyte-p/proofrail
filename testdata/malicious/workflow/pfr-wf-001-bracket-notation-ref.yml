@@ -1,0 +1,16 @@
+# must_detect: PFR-WF-001
+# must_detect: PFR-WF-004
+# variant_of: pfr-wf-001-privileged-untrusted-checkout.yml
+# The same pwn request written with index syntax. GitHub resolves
+# github['event']['pull_request'] exactly as github.event.pull_request, so this
+# file is the canonical attack, not a different one.
+name: pr-preview
+on: pull_request_target
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: "${{ github['event']['pull_request']['head']['sha'] }}"
+      - run: echo "${{ github['event']['pull_request']['title'] }}"

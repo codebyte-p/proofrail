@@ -1,0 +1,10 @@
+# Compensating control: pull_request_target checks out the base revision only,
+# so no fork-controlled code is executed with the privileged token.
+name: pr-label
+on: pull_request_target
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - run: ./scripts/label.sh

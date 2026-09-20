@@ -1,0 +1,14 @@
+# expected_clean: PFR-WF-001
+# variant_of: pfr-wf-001-base-checkout.yml
+# Index syntax is not itself the hazard: this one reads a property the pull
+# request author cannot set, so the privileged job still builds base code.
+name: pr-label
+on: pull_request_target
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: "${{ github['event']['repository']['default_branch'] }}"
+      - run: ./scripts/label.sh

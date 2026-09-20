@@ -1,0 +1,6 @@
+{
+  "name": "example",
+  "dependencies": {
+    "safe-client": "git+https://example.invalid/team/safe-client.git#main"
+  }
+}

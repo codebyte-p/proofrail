@@ -1,8 +1,8 @@
 # ProofRail Product and System Design
 
-- **Status:** Proposed for owner and independent Claude review
+- **Status:** Approved for Gate 1 implementation
 - **Date:** 2026-09-16
-- **Implementation authorization:** Not granted by this document
+- **Implementation authorization:** Granted by the repository owner on 2026-09-16 after independent Claude review returned `APPROVE`
 
 ## Problem
 

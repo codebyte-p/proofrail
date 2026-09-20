@@ -17,6 +17,15 @@ Metrics:
 
 ## Gate 0: specification approval
 
+**Status:** Closed on 2026-09-16.
+
+Approval evidence:
+
+- The specification package is committed at revision `f05b6b9f7558bd557a1496354a12ea8c1638a69e`.
+- Codex completed the documented consistency, link, citation, placeholder, and Markdown integrity checks.
+- Claude independently returned `APPROVE` after reviewing all ten specification and governance documents.
+- The repository owner explicitly approved Gate 0 on 2026-09-16.
+
 Required before application code:
 
 - Product design, architecture, threat model, analyzer contracts, policy ADR, and validation gates are committed.

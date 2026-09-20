@@ -1,0 +1,16 @@
+# Canonical JSON, golden files, and fixture corpora are compared byte for byte.
+# Force LF in the working tree on every platform so determinism evidence is
+# portable and a Windows checkout cannot change a recorded digest.
+* text=auto eol=lf
+
+*.go       text eol=lf
+*.md       text eol=lf
+*.yml      text eol=lf
+*.yaml     text eol=lf
+*.json     text eol=lf
+*.toml     text eol=lf
+
+# Byte-exact artifacts: never translate these.
+*.golden   -text
+*.sarif    -text
+testdata/** -text

@@ -1,0 +1,14 @@
+# expected_clean: PFR-WF-001
+# variant_of: pfr-wf-001-base-checkout.yml
+# A run step that uses raw Git is not a fork checkout unless it names a
+# pull-request ref. Ordinary maintenance Git must stay silent.
+name: pr-label
+on: pull_request_target
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          git fetch origin main
+          git checkout main
+      - run: ./scripts/label.sh

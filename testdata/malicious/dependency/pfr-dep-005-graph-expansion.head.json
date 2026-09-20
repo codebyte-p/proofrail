@@ -1,0 +1,11 @@
+{
+  "name": "example",
+  "dependencies": {
+    "left-pad": "^1.3.0",
+    "mega-framework": "^7.0.0",
+    "mega-plugin-a": "^1.0.0",
+    "mega-plugin-b": "^1.0.0",
+    "mega-plugin-c": "^1.0.0",
+    "mega-plugin-d": "^1.0.0"
+  }
+}

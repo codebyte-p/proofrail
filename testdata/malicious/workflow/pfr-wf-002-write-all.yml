@@ -1,0 +1,9 @@
+# PFR-WF-002: the head revision widens the workflow token to every scope.
+name: build
+on: push
+permissions: write-all
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make build
