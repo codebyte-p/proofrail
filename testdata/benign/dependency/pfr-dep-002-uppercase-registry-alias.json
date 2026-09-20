@@ -1,0 +1,6 @@
+{
+  "name": "example",
+  "dependencies": {
+    "safe-client": "NPM:safe-client@2.4.1"
+  }
+}

@@ -46,6 +46,7 @@ func Redact(s string) string {
 	// and throw away the more useful classification.
 	s = redactPEMBodies(s)
 	s = redactTokenShapes(s)
+	s = redactURLCredentials(s)
 	s = redactSecretAssignments(s)
 	return s
 }
@@ -114,13 +115,41 @@ func redactSecretAssignments(s string) string {
 	return strings.Join(lines, "\n")
 }
 
-// redactAssignmentInLine redacts every secret-bearing assignment on one line.
+// markerWidth returns the full width of a redaction marker at the start of s,
+// or 0 when s does not begin with one.
 //
-// Examining only the first separator meant a line whose first key was innocuous
-// carried all of its later values out intact, as in
-// `user=alice, api_key=<secret>`. Each separator is now considered in turn, and
-// a redacted value extends only to the next assignment delimiter so the
-// innocuous fields around it survive.
+// Only a marker this package could have written counts: `[REDACTED:` followed
+// by a lowercase kind and a closing bracket. Trusting any bracketed text that
+// merely started with the prefix let attacker-supplied content wear the marker
+// as a disguise -- `0[REDACTED: GITHUB_PAT: github_pat_...]` was skipped whole
+// by every detector and the token inside survived untouched.
+func markerWidth(s string) int {
+	const prefix = "[REDACTED:"
+	if !strings.HasPrefix(s, prefix) {
+		return 0
+	}
+	i := len(prefix)
+	for i < len(s) && ((s[i] >= 'a' && s[i] <= 'z') || (s[i] >= '0' && s[i] <= '9') || s[i] == '_') {
+		i++
+	}
+	if i == len(prefix) || i >= len(s) || s[i] != ']' {
+		return 0
+	}
+	return i + 1
+}
+
+// isKeyByte reports whether c can appear in a key name.
+//
+// A key is the token immediately touching the separator, nothing more. Walking
+// further back swallowed whole sentences of prose, so a finding message
+// containing the word "token" before a colon lost its content — evidence
+// destroyed in canonical JSON, which is the source of truth.
+func isKeyByte(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+		(c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.'
+}
+
+// redactAssignmentInLine redacts every secret-bearing assignment on one line.
 func redactAssignmentInLine(line string) string {
 	var b strings.Builder
 	b.Grow(len(line))
@@ -139,18 +168,34 @@ func redactAssignmentInLine(line string) string {
 		value := line[valueStart:valueEnd]
 		trimmed := strings.TrimLeft(value, " \t")
 
+		// A quoted value keeps its quotes and only its content is replaced.
+		// Swallowing the quotes made an empty `""` look like a value worth
+		// redacting, and the marker then absorbed whatever followed the closing
+		// quote on the next pass, so `token=""0` lost its `0`.
+		open, inner, closing := "", trimmed, ""
+		if len(trimmed) >= 2 && (trimmed[0] == '"' || trimmed[0] == '\'') && trimmed[len(trimmed)-1] == trimmed[0] {
+			open, inner, closing = trimmed[:1], trimmed[1:len(trimmed)-1], trimmed[len(trimmed)-1:]
+		}
+
 		switch {
 		case key == "" || !looksSecretBearing(key),
-			strings.TrimSpace(trimmed) == "",
-			valueAlreadyClassified(strings.TrimSpace(trimmed)):
-			b.WriteString(line[pos:valueEnd])
+			strings.TrimSpace(inner) == "",
+			valueAlreadyClassified(strings.TrimSpace(inner)):
+			// Not a secret-bearing assignment. Emit only through the separator
+			// and resume scanning inside the value, because a secret can be
+			// nested in one: `a: "password: <secret>"` would otherwise be
+			// consumed whole as the innocuous value of `a`.
+			b.WriteString(line[pos : sep+1])
+			pos = sep + 1
 		default:
 			leading := value[:len(value)-len(trimmed)]
 			b.WriteString(line[pos : sep+1])
 			b.WriteString(leading)
+			b.WriteString(open)
 			b.WriteString("[REDACTED:secret_assignment]")
+			b.WriteString(closing)
+			pos = valueEnd
 		}
-		pos = valueEnd
 	}
 	b.WriteString(line[pos:])
 	return b.String()
@@ -163,12 +208,8 @@ func redactAssignmentInLine(line string) string {
 // pass and break idempotence.
 func indexOfSeparator(line string, start int) int {
 	for i := start; i < len(line); i++ {
-		if strings.HasPrefix(line[i:], "[REDACTED:") {
-			end := strings.IndexByte(line[i:], ']')
-			if end < 0 {
-				return -1
-			}
-			i += end
+		if w := markerWidth(line[i:]); w > 0 {
+			i += w - 1
 			continue
 		}
 		if line[i] == '=' || line[i] == ':' {
@@ -181,20 +222,53 @@ func indexOfSeparator(line string, start int) int {
 // keyBefore returns the token immediately preceding a separator, which is the
 // key that names the value being assigned.
 func keyBefore(line string, start, sep int) string {
-	begin := start
-	for i := sep - 1; i >= start; i-- {
-		if isValueDelimiter(line[i]) {
-			begin = i + 1
-			break
-		}
+	// A JSON or YAML key is quoted, and the closing quote sits between the name
+	// and the separator. Stopping at it returned an empty key, so every quoted
+	// secret-bearing name went uninspected.
+	end := sep
+	// `TOKEN = value` puts whitespace between the name and the separator.
+	for end > start && (line[end-1] == ' ' || line[end-1] == '\t') {
+		end--
 	}
-	return line[begin:sep]
+	if end > start && (line[end-1] == '"' || line[end-1] == '\'') {
+		end--
+	}
+	begin := end
+	for begin > start && isKeyByte(line[begin-1]) {
+		begin--
+	}
+	return line[begin:end]
 }
 
-// endOfValue returns the index just past the assigned value, which runs to the
-// next delimiter or to the end of the line.
+// endOfValue returns the index just past the assigned value.
+//
+// The value runs to the next `,` or `;`, to the start of the next assignment,
+// or to the end of the line -- whichever comes first. A quoted value instead
+// runs to its closing quote, because a comma inside quotes belongs to the
+// secret rather than ending it; stopping at one left the tail in cleartext.
 func endOfValue(line string, start int) int {
-	for i := start; i < len(line); i++ {
+	i := start
+	for i < len(line) && (line[i] == ' ' || line[i] == '	') {
+		i++
+	}
+	if i < len(line) && (line[i] == '"' || line[i] == '\'') {
+		quote := line[i]
+		for j := i + 1; j < len(line); j++ {
+			if line[j] == quote {
+				return j + 1
+			}
+		}
+		return len(line)
+	}
+
+	for ; i < len(line); i++ {
+		// A marker an earlier pass wrote is part of this value, not the start
+		// of a new pair: its own `kind:` text would otherwise end the value
+		// early and the remainder would be re-redacted on every later pass.
+		if w := markerWidth(line[i:]); w > 0 {
+			i += w - 1
+			continue
+		}
 		if isValueDelimiter(line[i]) {
 			return i
 		}
@@ -218,12 +292,8 @@ func valueAlreadyClassified(value string) bool {
 
 	var rest strings.Builder
 	for i := 0; i < len(value); {
-		if strings.HasPrefix(value[i:], "[REDACTED:") {
-			end := strings.IndexByte(value[i:], ']')
-			if end < 0 {
-				break
-			}
-			i += end + 1
+		if w := markerWidth(value[i:]); w > 0 {
+			i += w
 			continue
 		}
 		rest.WriteByte(value[i])
@@ -232,11 +302,31 @@ func valueAlreadyClassified(value string) bool {
 
 	const maxSchemeWordBytes = 16
 	for _, word := range strings.Fields(rest.String()) {
+		// Structural punctuation -- a closing brace, a quote, a comma -- belongs
+		// to the document around the value, not to the value. Treating it as
+		// unclassified text made a marker inside a JSON object look unredacted,
+		// so every later pass redacted it again and Redact stopped being
+		// idempotent.
+		if isPunctuationOnly(word) {
+			continue
+		}
 		if len(word) > maxSchemeWordBytes || !isAlphabeticWord(word) {
 			return false
 		}
 	}
 	return true
+}
+
+// isPunctuationOnly reports whether s carries no letters or digits, and so no
+// credential material.
+func isPunctuationOnly(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
+			return false
+		}
+	}
+	return len(s) > 0
 }
 
 func isAlphabeticWord(s string) bool {
@@ -254,6 +344,43 @@ func isAlphabeticWord(s string) bool {
 // A space is not a delimiter: `Authorization: Bearer <token>` is a single
 // value whose scheme and credential are separated by one.
 func isValueDelimiter(c byte) bool { return c == ',' || c == ';' }
+
+// redactURLCredentials removes the userinfo from a URL.
+//
+// `https://user:password@host` carries a credential no key name announces: the
+// only separator before it belongs to the scheme, and `user` is not a
+// secret-bearing name, so the assignment pass cannot see it. Here the shape
+// itself is the signal.
+func redactURLCredentials(s string) string {
+	const marker = "://"
+	var b strings.Builder
+	b.Grow(len(s))
+
+	for i := 0; i < len(s); {
+		idx := strings.Index(s[i:], marker)
+		if idx < 0 {
+			b.WriteString(s[i:])
+			return b.String()
+		}
+		authorityStart := i + idx + len(marker)
+		b.WriteString(s[i:authorityStart])
+
+		end := authorityStart
+		for end < len(s) && !strings.ContainsRune("/?# 	\"'", rune(s[end])) {
+			end++
+		}
+		authority := s[authorityStart:end]
+
+		if at := strings.LastIndexByte(authority, '@'); at >= 0 {
+			b.WriteString("[REDACTED:url_credentials]")
+			b.WriteString(authority[at:])
+		} else {
+			b.WriteString(authority)
+		}
+		i = end
+	}
+	return b.String()
+}
 
 // normalizeKeyName reduces a key to lowercase letters, digits, and underscores
 // so that `API-KEY`, `"apiKey"`, and `client_secret` all compare alike.
@@ -309,13 +436,10 @@ func redactTokenShapes(s string) string {
 
 	for i := 0; i < len(s); {
 		// Do not rewrite a marker an earlier pass produced.
-		if strings.HasPrefix(s[i:], "[REDACTED:") {
-			end := strings.IndexByte(s[i:], ']')
-			if end >= 0 {
-				b.WriteString(s[i : i+end+1])
-				i += end + 1
-				continue
-			}
+		if w := markerWidth(s[i:]); w > 0 {
+			b.WriteString(s[i : i+w])
+			i += w
+			continue
 		}
 
 		if kind, width, ok := matchJWT(s[i:]); ok {
@@ -388,23 +512,50 @@ func matchJWT(s string) (kind string, width int, ok bool) {
 // GitHub `${{ ... }}` expression and names a credential even though the value
 // is not present in the text.
 func matchSecretsExpression(s string) (width int, ok bool) {
-	const prefix = "secrets."
-	if !strings.HasPrefix(s, prefix) {
+	const context = "secrets"
+	if len(s) < len(context) || !strings.EqualFold(s[:len(context)], context) {
 		return 0, false
 	}
-	name := 0
-	for len(s) > len(prefix)+name {
-		c := s[len(prefix)+name]
-		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' {
+	rest := s[len(context):]
+
+	// GitHub folds the context name's case and treats `secrets['NAME']` as the
+	// same reference as `secrets.NAME`, so matching only the lowercase dotted
+	// spelling left both other forms unclassified.
+	switch {
+	case strings.HasPrefix(rest, "."):
+		name := 0
+		for len(rest) > 1+name && isSecretNameByte(rest[1+name]) {
 			name++
-			continue
 		}
-		break
+		if name == 0 {
+			return 0, false
+		}
+		return len(context) + 1 + name, true
+
+	case strings.HasPrefix(rest, "["):
+		if len(rest) < 2 {
+			return 0, false
+		}
+		quote := rest[1]
+		if quote != '\'' && quote != '"' {
+			return 0, false
+		}
+		closing := strings.IndexByte(rest[2:], quote)
+		if closing <= 0 {
+			return 0, false
+		}
+		after := 2 + closing + 1
+		if after >= len(rest) || rest[after] != ']' {
+			return 0, false
+		}
+		return len(context) + after + 1, true
 	}
-	if name == 0 {
-		return 0, false
-	}
-	return len(prefix) + name, true
+	return 0, false
+}
+
+func isSecretNameByte(c byte) bool {
+	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+		(c >= '0' && c <= '9') || c == '_'
 }
 
 // pemHeaders introduce key material whose body must not survive.
@@ -430,10 +581,14 @@ func redactPEMBodies(s string) string {
 		rest := s[start+len(header):]
 		end := len(s)
 		if idx := strings.Index(rest, "-----END"); idx >= 0 {
-			if close := strings.Index(rest[idx:], "-----\n"); close >= 0 {
-				end = start + len(header) + idx + close + len("-----\n")
-			} else if close := strings.LastIndex(rest[idx:], "-----"); close > 0 {
-				end = start + len(header) + idx + close + len("-----")
+			// The footer ends at the first `-----` after `-----END`, and the
+			// search has to start there. Looking for `-----\n` anywhere in the
+			// remaining text instead matched the NEXT block's header when two
+			// keys sat on one line, so the replacement swallowed that header
+			// and left its body in the clear.
+			afterEnd := idx + len("-----END")
+			if close := strings.Index(rest[afterEnd:], "-----"); close >= 0 {
+				end = start + len(header) + afterEnd + close + len("-----")
 			}
 		}
 		s = s[:start] + "[REDACTED:private_key]" + s[end:]

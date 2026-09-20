@@ -388,3 +388,27 @@ func TestSortFindingsOrdersByFingerprint(t *testing.T) {
 		}
 	}
 }
+
+// TestEvidenceOrderingIsDeterminedByTheWholeItem proves the evidence sort key
+// determines the element it orders.
+//
+// Ordering by kind and digest alone leaves two items that agree on both but
+// differ in source in whatever order the sort happened to visit them. Canonical
+// JSON carries source, so an ordering that depends on a sort implementation
+// detail makes the canonical bytes depend on it too. Independent review finding.
+func TestEvidenceOrderingIsDeterminedByTheWholeItem(t *testing.T) {
+	const digest = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+	a := Evidence{Kind: "workflow_trigger", Source: "a.yml#on", Digest: digest, Excerpt: "same"}
+	b := Evidence{Kind: "workflow_trigger", Source: "b.yml#on", Digest: digest, Excerpt: "same"}
+
+	forward := []Evidence{a, b}
+	reversed := []Evidence{b, a}
+	sortEvidence(forward)
+	sortEvidence(reversed)
+
+	for i := range forward {
+		if forward[i] != reversed[i] {
+			t.Fatalf("evidence order depends on input order at index %d: %+v vs %+v", i, forward[i], reversed[i])
+		}
+	}
+}

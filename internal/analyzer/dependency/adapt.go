@@ -27,21 +27,22 @@ func classifyNPMSpec(spec string) (SourceKind, bool) {
 	switch {
 	case trimmed == "":
 		return SourceUnknown, false
-	case strings.HasPrefix(trimmed, "file:"), strings.HasPrefix(trimmed, "link:"),
+	case hasPrefixFold(trimmed, "file:"), hasPrefixFold(trimmed, "link:"),
 		strings.HasPrefix(trimmed, "./"), strings.HasPrefix(trimmed, "../"), strings.HasPrefix(trimmed, "/"):
 		return SourcePath, false
-	case strings.HasPrefix(trimmed, "workspace:"):
+	case hasPrefixFold(trimmed, "workspace:"):
 		return SourceWorkspace, false
-	case strings.HasPrefix(trimmed, "git+"), strings.HasPrefix(trimmed, "git:"),
-		strings.HasPrefix(trimmed, "github:"), strings.HasPrefix(trimmed, "gitlab:"),
-		strings.HasPrefix(trimmed, "bitbucket:"):
+	case hasPrefixFold(trimmed, "git+"), hasPrefixFold(trimmed, "git:"),
+		hasPrefixFold(trimmed, "github:"), hasPrefixFold(trimmed, "gitlab:"),
+		hasPrefixFold(trimmed, "bitbucket:"):
 		return SourceGit, gitReferenceIsImmutable(trimmed)
-	case strings.HasPrefix(trimmed, "http://"), strings.HasPrefix(trimmed, "https://"):
+	case hasPrefixFold(trimmed, "http://"), hasPrefixFold(trimmed, "https://"):
 		// A tarball URL carries no integrity value of its own, so the bytes it
 		// serves can change without the specifier changing.
 		return SourceURL, false
-	case strings.HasPrefix(trimmed, "npm:"):
-		return SourceRegistry, isExactNPMVersion(strings.TrimPrefix(trimmed, "npm:"))
+	case hasPrefixFold(trimmed, "npm:"):
+		rest, _ := trimPrefixFold(trimmed, "npm:")
+		return SourceRegistry, isExactNPMVersion(rest)
 	case isGitHubShorthand(trimmed):
 		// npm resolves a bare `owner/repo` to GitHub. Falling through to the
 		// registry branch classified it as a registry dependency, which
@@ -50,6 +51,31 @@ func classifyNPMSpec(spec string) (SourceKind, bool) {
 	default:
 		return SourceRegistry, isExactNPMVersion(trimmed)
 	}
+}
+
+// trimPrefixFold strips prefix from s ignoring case, and reports whether it was
+// there.
+//
+// A URI scheme is case-insensitive and npm resolves `HTTPS://`, `GIT+` and
+// `File:` exactly as it resolves their lowercase spellings. Matching them
+// case-sensitively dropped every uppercase spelling into the registry branch,
+// which PFR-DEP-002 skips outright, so the dependency was not downgraded to
+// review but omitted from the report entirely.
+//
+// Only the scheme is folded. What a caller echoes into evidence keeps the
+// spelling the repository wrote, and a reference is still judged immutable on
+// its original text, so an uppercase commit hash stays unpinned rather than
+// being promoted by a case fold.
+func trimPrefixFold(s, prefix string) (string, bool) {
+	if len(s) < len(prefix) || !strings.EqualFold(s[:len(prefix)], prefix) {
+		return s, false
+	}
+	return s[len(prefix):], true
+}
+
+func hasPrefixFold(s, prefix string) bool {
+	_, found := trimPrefixFold(s, prefix)
+	return found
 }
 
 // isGitHubShorthand reports whether spec is npm's `owner/repo` or
@@ -71,7 +97,7 @@ func isGitHubShorthand(spec string) bool {
 // "" when it names a range. It is what PFR-DEP-001 compares against the lock.
 func exactNPMVersion(spec string) string {
 	s := strings.TrimSpace(spec)
-	s = strings.TrimPrefix(s, "npm:")
+	s, _ = trimPrefixFold(s, "npm:")
 	// An aliased spec is `npm:<name>@<version>`; a plain one has no `@`.
 	if i := strings.LastIndex(s, "@"); i > 0 {
 		s = s[i+1:]
@@ -170,11 +196,11 @@ func classifyPythonSpec(spec string) (SourceKind, bool) {
 	if _, reference, found := strings.Cut(s, "@"); found {
 		ref := strings.TrimSpace(reference)
 		switch {
-		case strings.HasPrefix(ref, "git+"):
+		case hasPrefixFold(ref, "git+"):
 			return SourceGit, pythonGitReferenceIsImmutable(ref)
-		case strings.HasPrefix(ref, "file://"), strings.HasPrefix(ref, "./"), strings.HasPrefix(ref, "/"):
+		case hasPrefixFold(ref, "file://"), strings.HasPrefix(ref, "./"), strings.HasPrefix(ref, "/"):
 			return SourcePath, false
-		case strings.HasPrefix(ref, "http://"), strings.HasPrefix(ref, "https://"):
+		case hasPrefixFold(ref, "http://"), hasPrefixFold(ref, "https://"):
 			return SourceURL, false
 		default:
 			return SourceUnknown, false
@@ -182,8 +208,12 @@ func classifyPythonSpec(spec string) (SourceKind, bool) {
 	}
 
 	if !strings.ContainsAny(s, "<>=!~") {
-		// A bare name floats to whatever the index serves today.
-		return SourceUnpinned, false
+		// A bare name floats to whatever the index serves today, exactly as an
+		// npm range does. Both are ordinary registry practice, so both belong
+		// to PFR-DEP-001 through lock resolution rather than to PFR-DEP-002,
+		// which would have blocked in one ecosystem what it exempts in the
+		// other.
+		return SourceRegistry, false
 	}
 	return SourceRegistry, strings.Contains(s, "==")
 }
@@ -191,7 +221,7 @@ func classifyPythonSpec(spec string) (SourceKind, bool) {
 // pythonGitReferenceIsImmutable reports whether `git+<url>@<ref>` names a full
 // commit hash rather than a branch or tag.
 func pythonGitReferenceIsImmutable(ref string) bool {
-	trimmed := strings.TrimPrefix(ref, "git+")
+	trimmed, _ := trimPrefixFold(ref, "git+")
 	// Strip the scheme so its `//` cannot be mistaken for the revision marker.
 	if _, rest, found := strings.Cut(trimmed, "://"); found {
 		trimmed = rest
@@ -228,8 +258,11 @@ func classifyUVSource(git, url, localPath, branch, tag, rev string) (SourceKind,
 // be changed by the platform the scan runs on.
 func pathEscapesRepository(spec, manifestPath string) bool {
 	s := strings.TrimSpace(spec)
+	// Folded, for the same reason the classifier folds: `File:/opt/lib` and
+	// `file:/opt/lib` name one path, and leaving the scheme attached hid the
+	// leading slash that makes it absolute.
 	for _, prefix := range []string{"file:", "link:", "workspace:"} {
-		s = strings.TrimPrefix(s, prefix)
+		s, _ = trimPrefixFold(s, prefix)
 	}
 	if s == "" || s == "*" {
 		return false

@@ -50,10 +50,10 @@ func (a analyzer) Analyze(ctx context.Context, in run.AnalysisInput) run.Analyze
 	result := run.AnalyzerResult{AnalyzerID: ID, AnalyzerVersion: Version}
 
 	var (
-		candidates []finding.Finding
-		notes      []string
-		diags      []run.Diagnostic
-		analyzed   int
+		budget   = newBudget(in.Limits.MaxFindings)
+		notes    []string
+		diags    []run.Diagnostic
+		analyzed int
 	)
 
 	for _, file := range in.Changes.Files {
@@ -96,13 +96,13 @@ func (a analyzer) Analyze(ctx context.Context, in run.AnalysisInput) run.Analyze
 			diags = append(diags, baseDiags...)
 		}
 
-		candidates = append(candidates, evaluate(head, base)...)
+		evaluate(head, base, budget)
 	}
 
 	// Finalize is the aggregation step docs/analyzers.md requires: it validates,
 	// redacts, orders, and fingerprints. A candidate that cannot survive it is a
 	// bug in this analyzer, and failing closed is the only safe response.
-	for _, candidate := range candidates {
+	for _, candidate := range budget.items {
 		f, err := finding.Finalize(candidate)
 		if err != nil {
 			diags = append(diags, run.Diagnostic{
@@ -117,14 +117,14 @@ func (a analyzer) Analyze(ctx context.Context, in run.AnalysisInput) run.Analyze
 	finding.Sort(result.Findings)
 
 	// docs/architecture.md caps a run's findings and CLAUDE.md makes any budget
-	// failure yield incomplete and exit code 2, so the ceiling is enforced as a
-	// failure rather than as a silent truncation.
-	if limit := in.Limits.MaxFindings; limit > 0 && len(result.Findings) > limit {
-		result.Findings = result.Findings[:limit]
+	// failure yield incomplete and exit code 2. The flag is set only where a
+	// candidate was actually refused, so a run that fills the ceiling exactly
+	// has lost nothing and stays complete.
+	if budget.exceeded {
 		diags = append(diags, run.Diagnostic{
 			Code:    ID + ".finding_budget_exceeded",
 			Path:    ID,
-			Message: "the analyzer produced more findings than the configured ceiling allows",
+			Message: "the analyzer reached the configured finding ceiling and stopped before examining every change",
 		})
 	}
 

@@ -1,0 +1,6 @@
+{
+  "name": "example",
+  "dependencies": {
+    "local-lib": "File:./packages/lib"
+  }
+}

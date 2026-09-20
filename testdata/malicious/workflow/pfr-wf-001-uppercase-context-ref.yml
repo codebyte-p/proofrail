@@ -1,0 +1,15 @@
+# must_detect: PFR-WF-001
+# must_detect: PFR-WF-004
+# variant_of: pfr-wf-001-privileged-untrusted-checkout.yml
+# Context and property names are case-insensitive in an Actions expression, so
+# shouting the same path changes nothing about what runs.
+name: pr-preview
+on: pull_request_target
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: "${{ GITHUB.EVENT.PULL_REQUEST.HEAD.SHA }}"
+      - run: echo "${{ GITHUB.EVENT.PULL_REQUEST.TITLE }}"

@@ -89,6 +89,17 @@ func sortEvidence(evidence []Evidence) {
 		if a.Kind != b.Kind {
 			return a.Kind < b.Kind
 		}
-		return a.Digest < b.Digest
+		if a.Digest != b.Digest {
+			return a.Digest < b.Digest
+		}
+		// Kind and Digest do not determine the item: two declarations of the
+		// same dependency in different workspace manifests share both while
+		// differing in Source. Without a total order the result depended on the
+		// sort implementation, which would move canonical bytes without moving
+		// any fingerprint.
+		if a.Source != b.Source {
+			return a.Source < b.Source
+		}
+		return a.Excerpt < b.Excerpt
 	})
 }

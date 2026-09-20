@@ -1,5 +1,20 @@
-# Fixtures the Gate 1 plan marks must_detect, one `<rule> <fixture>` per line.
-# Task 5 Step 4 requires PFR-DEP-001 and PFR-DEP-004 to be labeled. JSON has no
-# comment syntax, so the label lives here rather than inside the parsed content.
+# Fixtures the Gate 1 plan marks must_detect, one label per line:
+#
+#     <RULE> <fixture> [variant_of=<canonical-fixture>]
+#
+# JSON has no comment syntax, so the label lives here rather than inside the
+# parsed content.
+#
+# A fixture that writes a must-detect scenario in an equivalent syntax is an
+# independent must-detect fixture in its own right, because an analyzer that
+# matches one spelling and misses the other detects nothing at all. It names the
+# canonical fixture it varies so a reviewer reads the family rather than five
+# unrelated cases.
 PFR-DEP-001 pfr-dep-001-manifest-lock-mismatch.head.json
+PFR-DEP-002 pfr-dep-002-git-dependency.json
+PFR-DEP-002 pfr-dep-002-uppercase-git-dependency.json variant_of=pfr-dep-002-git-dependency.json
+PFR-DEP-002 pfr-dep-002-url-dependency.json
+PFR-DEP-002 pfr-dep-002-uppercase-url-dependency.json variant_of=pfr-dep-002-url-dependency.json
+PFR-DEP-002 pfr-dep-002-path-escape.json
+PFR-DEP-002 pfr-dep-002-uppercase-path-escape.json variant_of=pfr-dep-002-path-escape.json
 PFR-DEP-004 pfr-dep-004-source-changed.head.json

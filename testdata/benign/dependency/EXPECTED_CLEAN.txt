@@ -1,0 +1,16 @@
+# Fixtures that must produce no blocking finding for the named rule, one label
+# per line:
+#
+#     <RULE> <fixture> [variant_of=<canonical-fixture>]
+#
+# JSON has no comment syntax, so the label lives here rather than inside the
+# parsed content.
+#
+# These count toward the false-block metric. A variant writes the same safe
+# arrangement in an equivalent syntax, so an analyzer that judges the spelling
+# rather than the substance is caught here instead of in a pilot.
+PFR-DEP-002 pfr-dep-002-registry-dependency.json
+PFR-DEP-002 pfr-dep-002-python-registry.toml
+PFR-DEP-002 pfr-dep-002-uppercase-registry-alias.json variant_of=pfr-dep-002-registry-dependency.json
+PFR-DEP-002 pfr-dep-002-contained-path.json
+PFR-DEP-002 pfr-dep-002-uppercase-contained-path.json variant_of=pfr-dep-002-contained-path.json

@@ -39,6 +39,11 @@ func newBudget(limit int) *budget {
 func (b *budget) full() bool { return len(b.items) >= b.limit }
 
 // add offers one candidate and reports whether the caller may continue.
+//
+// Refusing a candidate is the only thing that marks the budget exceeded, and
+// the diagnostic that flag raises makes the run incomplete with exit code 2.
+// Setting it on arrival at the ceiling instead failed a run that reported every
+// finding it found and dropped nothing, purely for fitting the budget exactly.
 func (b *budget) add(f finding.Finding) bool {
 	b.generated++
 	if b.full() {
@@ -67,10 +72,6 @@ func evaluate(base, head Snapshot, b *budget) {
 		ruleGraphExpansion,
 		ruleNameSimilarity,
 	} {
-		if b.full() {
-			b.exceeded = true
-			return
-		}
 		rule(base, head, b)
 	}
 }
@@ -226,32 +227,21 @@ func ruleNonRegistryDependency(base, head Snapshot, b *budget) {
 	baseDeclared := base.declaredNames()
 
 	for _, d := range head.Declared {
-		if b.full() {
-			b.exceeded = true
-			return
-		}
-		if d.Source == SourceRegistry && d.Immutable {
-			continue
-		}
 		if d.Source == SourceRegistry {
-			// A range against a registry is ordinary practice and is covered by
-			// lock resolution rather than by this rule.
+			// A registry dependency, pinned or ranged, is ordinary practice and
+			// is covered by lock resolution rather than by this rule.
 			continue
 		}
 		if previous, existed := baseDeclared[declaredKey(d)]; existed && previous.Spec == d.Spec {
 			continue
 		}
 
-		// docs/analyzers.md blocks when a source is mutable *or* outside the
-		// repository. A local path that climbs out of the tree is outside it
-		// just as surely as a Git URL, and testing only Git and URL sources
-		// routed such a path to review.
-		// Outside the repository or mutable means the bytes a build fetches can
-		// change without any change here; that is the blocking condition.
 		// docs/analyzers.md: "Require review; block if mutable or outside
 		// repository." Requiring both conditions let a mutable reference that
 		// happened to sit inside the tree, and an escaping path that was not
-		// otherwise mutable, each fall through to review.
+		// otherwise mutable, each fall through to review. A local path that
+		// climbs out of the tree is outside the repository just as surely as a
+		// Git URL is.
 		outsideRepository := d.Source == SourceGit || d.Source == SourceURL || d.Escapes
 		decision := finding.DecisionRequireReview
 		severity := finding.SeverityMedium
@@ -266,9 +256,8 @@ func ruleNonRegistryDependency(base, head Snapshot, b *budget) {
 			Severity:     severity,
 			Confidence:   finding.ConfidenceHigh,
 			DecisionHint: decision,
-			Message: "Dependency " + safe(d.Name) + " resolves from a " + string(d.Source) +
-				" source that is not bound to an immutable identity, so the code it supplies can change without any change to this repository.",
-			Locations: []finding.Location{location(d.Path, d.Pos)},
+			Message:      nonRegistryMessage(d, outsideRepository),
+			Locations:    []finding.Location{location(d.Path, d.Pos)},
 			Evidence: []finding.Evidence{{
 				Kind:    "dependency_source",
 				Source:  d.Path + " " + d.Kind,
@@ -284,6 +273,28 @@ func ruleNonRegistryDependency(base, head Snapshot, b *budget) {
 	}
 }
 
+// nonRegistryMessage states why this particular source is being reported.
+//
+// One unconditional sentence could not be true of every branch: the
+// require-review branch is reachable only when the source IS immutable and
+// inside the repository, and the block branch also fires for a Git reference
+// pinned to a full commit. Saying "not bound to an immutable identity" in
+// either case is a false claim in canonical JSON, which is the source of truth.
+func nonRegistryMessage(d Declared, outsideRepository bool) string {
+	name := safe(d.Name)
+	switch {
+	case !d.Immutable:
+		return "Dependency " + name + " resolves from a " + string(d.Source) +
+			" source that is not bound to an immutable identity, so the code it supplies can change without any change to this repository."
+	case outsideRepository:
+		return "Dependency " + name + " resolves from a " + string(d.Source) +
+			" source outside this repository, so its contents are not bound to the revision under review even though the reference is pinned."
+	default:
+		return "Dependency " + name + " resolves from a " + string(d.Source) +
+			" source inside this repository, resolved by repository layout rather than by the lockfile."
+	}
+}
+
 // ----------------------------------------------------------------------------
 // PFR-DEP-003: lifecycle execution introduced
 // ----------------------------------------------------------------------------
@@ -292,10 +303,6 @@ func ruleLifecycleExecution(base, head Snapshot, b *budget) {
 	previous := base.scriptsByName()
 
 	for _, script := range head.Scripts {
-		if b.full() {
-			b.exceeded = true
-			return
-		}
 		if !isLifecycleScript(script.Name) && !strings.Contains(script.Name, "install script") &&
 			script.Name != "build-backend" {
 			continue
@@ -342,10 +349,6 @@ func ruleResolvedSourceChanged(base, head Snapshot, b *budget) {
 	previous := base.resolvedInstances()
 
 	for _, current := range head.Resolved {
-		if b.full() {
-			b.exceeded = true
-			return
-		}
 		before, existed := previous[resolvedKey(current)]
 		if !existed {
 			continue
@@ -514,10 +517,6 @@ func ruleNameSimilarity(base, head Snapshot, b *budget) {
 	}
 
 	for _, d := range head.Declared {
-		if b.full() {
-			b.exceeded = true
-			return
-		}
 		if _, existed := baseDeclared[declaredKey(d)]; existed {
 			continue
 		}

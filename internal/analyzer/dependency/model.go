@@ -33,7 +33,6 @@ const (
 	SourceGit       SourceKind = "git"
 	SourceURL       SourceKind = "url"
 	SourcePath      SourceKind = "path"
-	SourceUnpinned  SourceKind = "unpinned"
 	SourceUnknown   SourceKind = "unknown"
 	SourceWorkspace SourceKind = "workspace"
 )

@@ -8,21 +8,62 @@ import (
 	parser "github.com/codebyte-p/proofrail/internal/parser/workflow"
 )
 
+// budget bounds candidate generation.
+//
+// Enforcing a ceiling only on the returned slice still let a hostile workflow
+// drive every rule over every step and pay for a Finalize -- redaction plus a
+// SHA-256 -- on each result before anything was discarded. The budget is
+// therefore consulted while candidates are produced, so the work itself is
+// bounded rather than only the output.
+type budget struct {
+	limit    int
+	items    []finding.Finding
+	exceeded bool
+}
+
+// defaultFindingCeiling applies when a caller supplies no limit. It mirrors the
+// architecture ceiling so an unconfigured run is still bounded.
+const defaultFindingCeiling = 5000
+
+func newBudget(limit int) *budget {
+	if limit <= 0 {
+		limit = defaultFindingCeiling
+	}
+	return &budget{limit: limit}
+}
+
+// add offers one candidate and reports whether the caller may continue.
+//
+// exceeded is set only where a candidate is actually refused. A run that fills
+// the ceiling exactly has dropped nothing and stays complete; calling it a
+// budget failure would turn a whole clean result into exit code 2.
+func (b *budget) add(f finding.Finding) bool {
+	if len(b.items) >= b.limit {
+		b.exceeded = true
+		return false
+	}
+	b.items = append(b.items, f)
+	return true
+}
+
 // evaluate runs every PFR-WF rule over one workflow document.
 //
-// Rules are independent by construction: each appends its own candidates and
+// Rules are independent by construction: each offers its own candidates and
 // none of them reads or edits another's output. A workflow that is both a
 // privileged untrusted checkout and a self-hosted job produces both findings,
 // because suppressing one would understate the change.
-func evaluate(head, base parser.Document) []finding.Finding {
-	var out []finding.Finding
-	out = append(out, rulePrivilegedUntrustedCheckout(head)...)
-	out = append(out, ruleExcessiveTokenPermission(head, base)...)
-	out = append(out, ruleMutableActionReference(head)...)
-	out = append(out, ruleExpressionInjection(head)...)
-	out = append(out, ruleSecretsToUntrustedExecution(head)...)
-	out = append(out, ruleSelfHostedRunner(head)...)
-	return out
+//
+// Every rule is offered the budget even once it is full, because refusing a
+// candidate is what records that evidence was dropped. Skipping the remaining
+// rules instead would either hide a real truncation or fail a run that lost
+// nothing.
+func evaluate(head, base parser.Document, b *budget) {
+	rulePrivilegedUntrustedCheckout(head, b)
+	ruleExcessiveTokenPermission(head, base, b)
+	ruleMutableActionReference(head, b)
+	ruleExpressionInjection(head, b)
+	ruleSecretsToUntrustedExecution(head, b)
+	ruleSelfHostedRunner(head, b)
 }
 
 // privilegedUntrustedTriggers run with the base repository's token and secrets
@@ -89,15 +130,14 @@ var untrustedExpressionProperties = []string{
 // PFR-WF-001: privileged untrusted checkout
 // ----------------------------------------------------------------------------
 
-func rulePrivilegedUntrustedCheckout(doc parser.Document) []finding.Finding {
+func rulePrivilegedUntrustedCheckout(doc parser.Document, b *budget) {
 	trigger, ok := firstTrigger(doc, privilegedUntrustedTriggers)
 	if !ok {
-		return nil
+		return
 	}
 
-	var out []finding.Finding
 	for _, job := range doc.Jobs {
-		checkout, ref, found := untrustedCheckout(job)
+		checkout, ref, source, found := untrustedCheckout(job)
 		if !found {
 			continue
 		}
@@ -110,13 +150,13 @@ func rulePrivilegedUntrustedCheckout(doc parser.Document) []finding.Finding {
 			triggerEvidence(doc, trigger),
 			{
 				Kind:    "workflow_privileged_checkout",
-				Source:  pointer("jobs", job.ID.Value, "checkout ref"),
+				Source:  source,
 				Excerpt: ref.Value,
 			},
 			stepEvidence(job, executing),
 		}
 
-		out = append(out, finding.Finding{
+		if !b.add(finding.Finding{
 			RuleID:       "PFR-WF-001",
 			AnalyzerID:   ID,
 			Severity:     finding.SeverityHigh,
@@ -126,31 +166,88 @@ func rulePrivilegedUntrustedCheckout(doc parser.Document) []finding.Finding {
 				" trigger, checks out pull-request-controlled code, and then executes it with the base repository's token.",
 			Locations: locations(doc.Path,
 				trigger.Name.Pos, ref.Pos, stepAnchor(executing)),
-			Evidence: evidence,
-			Limitations: []string{
-				"Compensating organization or repository Actions policy is not visible in offline analysis.",
-				"A required approval or environment protection rule on this job cannot be read from the repository.",
-			},
-		})
+			Evidence:    evidence,
+			Limitations: checkoutLimitations(checkout),
+		}) {
+			return
+		}
+	}
+}
+
+// checkoutLimitations states what this finding did not establish. A checkout
+// recognized from shell text carries one more caveat than an `actions/checkout`
+// input, and saying so is the difference between honest evidence and a claim.
+func checkoutLimitations(checkout parser.Step) []string {
+	out := []string{
+		"Compensating organization or repository Actions policy is not visible in offline analysis.",
+		"A required approval or environment protection rule on this job cannot be read from the repository.",
+	}
+	if !checkout.Uses.Present() {
+		out = append(out,
+			"The checkout was recognized from the text of a `run:` script, which version 1 matches lexically rather than executing, so a script that reaches the same ref indirectly is not covered and a script that only names a pull-request ref is still reported.")
 	}
 	return out
 }
 
-// untrustedCheckout finds a checkout step whose ref or repository resolves to
-// pull-request-controlled code, returning the step and the deciding scalar.
-func untrustedCheckout(job parser.Job) (parser.Step, parser.Scalar, bool) {
+// untrustedCheckout finds the step that lands pull-request-controlled code on
+// the runner, returning the step, the deciding scalar, and the pointer that
+// names it.
+//
+// `actions/checkout` is not the only way in. The canonical pwn request fetches
+// `refs/pull/*/head` with raw Git and checks it out by hand, which an
+// Action-only search could not see at all, so a `run:` script that names a
+// pull-request ref counts as the same checkout.
+func untrustedCheckout(job parser.Job) (parser.Step, parser.Scalar, string, bool) {
 	for _, step := range job.Steps {
-		if !isCheckoutAction(step.Uses.Value) {
+		if isCheckoutAction(step.Uses.Value) {
+			for _, key := range []string{"ref", "repository"} {
+				value := step.With.Get(key)
+				if value.Present() && referencesUntrustedRef(value.Value) {
+					return step, value, pointer("jobs", job.ID.Value, "checkout ref"), true
+				}
+			}
 			continue
 		}
-		for _, key := range []string{"ref", "repository"} {
-			value := step.With.Get(key)
-			if value.Present() && referencesUntrustedRef(value.Value) {
-				return step, value, true
-			}
+		if step.Run.Present() && gitCheckoutOfPullRequest(step.Run.Value) {
+			return step, step.Run, pointer("jobs", job.ID.Value, "checkout script"), true
 		}
 	}
-	return parser.Step{}, parser.Scalar{}, false
+	return parser.Step{}, parser.Scalar{}, "", false
+}
+
+// gitCheckoutOfPullRequest reports whether a `run:` script brings a pull
+// request's own commits onto the runner with raw Git.
+//
+// The test is deliberately narrow: a Git fetch or checkout verb has to appear
+// together with a ref that only a pull request supplies. An ordinary
+// `git fetch origin main` in a privileged workflow therefore stays silent,
+// which is what keeps this from flooding every release pipeline.
+func gitCheckoutOfPullRequest(script string) bool {
+	s := normalizeExpression(script)
+	if !strings.Contains(s, "git ") {
+		return false
+	}
+	if !strings.Contains(s, "fetch") && !strings.Contains(s, "checkout") {
+		return false
+	}
+	return namesPullRequestRef(s)
+}
+
+// namesPullRequestRef reports whether normalized script text names a ref the
+// pull request author controls, either as a literal `refs/pull/<n>/head` and
+// its shorthand or through an untrusted expression the fetch resolves.
+func namesPullRequestRef(s string) bool {
+	for _, marker := range untrustedRefExpressions {
+		if strings.Contains(s, marker) {
+			return true
+		}
+	}
+	if i := strings.Index(s, "pull/"); i >= 0 && strings.Contains(s[i:], "/head") {
+		return true
+	}
+	// A fetch of the pull-request number resolves to fork-controlled code just
+	// as `head.sha` does, and the shorthand scripts use it directly.
+	return strings.Contains(s, "github.event.number")
 }
 
 func isCheckoutAction(uses string) bool {
@@ -162,12 +259,74 @@ func isCheckoutAction(uses string) bool {
 }
 
 func referencesUntrustedRef(value string) bool {
+	normalized := normalizeExpression(value)
 	for _, marker := range untrustedRefExpressions {
-		if strings.Contains(value, marker) {
+		if strings.Contains(normalized, marker) {
 			return true
 		}
 	}
 	return false
+}
+
+// normalizeExpression rewrites text into the single spelling the rule tables are
+// written in: lowercase, dotted property access.
+//
+// GitHub resolves context and property names case-insensitively and treats
+// `github['event']` as `github.event`, so comparing against literal lowercase
+// dotted paths missed both spellings and a workflow written either way produced
+// no finding at all. Normalizing the input is what makes the tables complete;
+// listing every spelling in them never could be.
+func normalizeExpression(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == '[' {
+			if name, next, ok := indexedProperty(s, i); ok {
+				b.WriteByte('.')
+				b.WriteString(name)
+				i = next - 1
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+	}
+	return strings.ToLower(b.String())
+}
+
+// indexedProperty reads a `['name']` or `["name"]` index starting at the
+// bracket and returns the property name with the offset just past the closing
+// bracket.
+//
+// Any other index form -- a variable, a number, a nested expression -- is left
+// exactly as written, because rewriting it would invent a property nobody put
+// in the document.
+func indexedProperty(s string, i int) (string, int, bool) {
+	j := skipSpaces(s, i+1)
+	if j >= len(s) || (s[j] != '\'' && s[j] != '"') {
+		return "", 0, false
+	}
+	quote := s[j]
+	j++
+	start := j
+	for j < len(s) && s[j] != quote {
+		j++
+	}
+	if j >= len(s) {
+		return "", 0, false
+	}
+	name := s[start:j]
+	j = skipSpaces(s, j+1)
+	if j >= len(s) || s[j] != ']' {
+		return "", 0, false
+	}
+	return name, j + 1, true
+}
+
+func skipSpaces(s string, i int) int {
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+		i++
+	}
+	return i
 }
 
 // firstExecutingStepAfter returns the first step after the checkout that runs a
@@ -200,17 +359,22 @@ func firstExecutingStepAfter(job parser.Job, checkout parser.Step) (parser.Step,
 // PFR-WF-002: excessive token permission
 // ----------------------------------------------------------------------------
 
-// grant is one write capability the workflow token gains, with the line that
-// granted it.
+// grant is one write capability the workflow token gains: the scope that names
+// the capability, where it was written, and the line that granted it.
+//
+// scope is the comparison key and where is only evidence, because the token's
+// capability is the same whether a scope is granted at workflow level or inside
+// one job.
 type grant struct {
 	scope string
+	where string
 	pos   parser.Position
 }
 
-func ruleExcessiveTokenPermission(head, base parser.Document) []finding.Finding {
+func ruleExcessiveTokenPermission(head, base parser.Document, b *budget) {
 	introduced := newWriteGrants(head, base)
 	if len(introduced) == 0 {
-		return nil
+		return
 	}
 
 	// An untrusted trigger turns a widened token into an immediately reachable
@@ -228,7 +392,7 @@ func ruleExcessiveTokenPermission(head, base parser.Document) []finding.Finding 
 		evidence = append(evidence, finding.Evidence{
 			Kind:    "workflow_permission",
 			Source:  "permissions",
-			Excerpt: g.scope,
+			Excerpt: g.where + ": " + g.scope,
 		})
 		positions = append(positions, g.pos)
 		scopes = append(scopes, safe(g.scope))
@@ -238,7 +402,7 @@ func ruleExcessiveTokenPermission(head, base parser.Document) []finding.Finding 
 		positions = append(positions, trigger.Name.Pos)
 	}
 
-	return []finding.Finding{{
+	b.add(finding.Finding{
 		RuleID:       "PFR-WF-002",
 		AnalyzerID:   ID,
 		Severity:     finding.SeverityHigh,
@@ -252,18 +416,27 @@ func ruleExcessiveTokenPermission(head, base parser.Document) []finding.Finding 
 			"A write scope can be legitimately required by a release or publishing job, so version 1 routes the expansion to review rather than asserting misuse.",
 			"The repository default workflow permission is a GitHub setting that offline analysis cannot read.",
 		},
-	}}
+	})
 }
 
-// newWriteGrants returns the write capabilities present in head and absent from
-// base, at workflow scope and at every job scope.
+// newWriteGrants returns the write capabilities the head revision gains,
+// comparing capability rather than placement.
+//
+// Keying a grant by the block that declared it made moving a workflow-wide
+// `contents: write` down into the one job that needs it -- the recommended
+// hardening -- look like a brand new grant, and a job rename did the same. Both
+// then hardened to block on an untrusted trigger, which punished the fix. The
+// scope name alone decides; where it was written survives as evidence.
 func newWriteGrants(head, base parser.Document) []grant {
 	before := writeGrants(base)
+	seen := make(map[string]bool)
 	var introduced []grant
 	for _, g := range collectWriteGrants(head) {
-		if !before[g.scope] {
-			introduced = append(introduced, g)
+		if before[g.scope] || seen[g.scope] {
+			continue
 		}
+		seen[g.scope] = true
+		introduced = append(introduced, g)
 	}
 	return introduced
 }
@@ -296,13 +469,13 @@ func permissionGrants(scopeName string, perm parser.Permissions) []grant {
 	var out []grant
 	if perm.Mode.Present() {
 		if strings.EqualFold(perm.Mode.Value, "write-all") {
-			out = append(out, grant{scope: scopeName + ": all scopes", pos: perm.Mode.Pos})
+			out = append(out, grant{scope: "all scopes", where: scopeName, pos: perm.Mode.Pos})
 		}
 		return out
 	}
 	for _, entry := range perm.Scopes {
 		if strings.EqualFold(entry.Value.Value, "write") {
-			out = append(out, grant{scope: scopeName + ": " + entry.Key.Value, pos: entry.Value.Pos})
+			out = append(out, grant{scope: entry.Key.Value, where: scopeName, pos: entry.Value.Pos})
 		}
 	}
 	return out
@@ -312,13 +485,13 @@ func permissionGrants(scopeName string, perm parser.Permissions) []grant {
 // PFR-WF-003: mutable third-party Action
 // ----------------------------------------------------------------------------
 
-func ruleMutableActionReference(doc parser.Document) []finding.Finding {
-	var out []finding.Finding
-
+func ruleMutableActionReference(doc parser.Document, b *budget) {
 	for _, job := range doc.Jobs {
 		if job.Uses.Present() {
 			if f, ok := mutableReferenceFinding(doc, job.Uses, "jobs."+safe(job.ID.Value)+".uses"); ok {
-				out = append(out, f)
+				if !b.add(f) {
+					return
+				}
 			}
 		}
 		for i, step := range job.Steps {
@@ -327,11 +500,12 @@ func ruleMutableActionReference(doc parser.Document) []finding.Finding {
 			}
 			source := "jobs." + safe(job.ID.Value) + ".steps[" + strconv.Itoa(i) + "].uses"
 			if f, ok := mutableReferenceFinding(doc, step.Uses, source); ok {
-				out = append(out, f)
+				if !b.add(f) {
+					return
+				}
 			}
 		}
 	}
-	return out
 }
 
 func mutableReferenceFinding(doc parser.Document, uses parser.Scalar, source string) (finding.Finding, bool) {
@@ -405,8 +579,7 @@ func isCommitSHA(ref string) bool {
 // PFR-WF-004: expression injection into shell
 // ----------------------------------------------------------------------------
 
-func ruleExpressionInjection(doc parser.Document) []finding.Finding {
-	var out []finding.Finding
+func ruleExpressionInjection(doc parser.Document, b *budget) {
 
 	trigger, untrusted := firstTrigger(doc, untrustedInputTriggers)
 
@@ -445,7 +618,7 @@ func ruleExpressionInjection(doc parser.Document) []finding.Finding {
 				evidence = append(evidence, triggerEvidence(doc, trigger))
 			}
 
-			out = append(out, finding.Finding{
+			if !b.add(finding.Finding{
 				RuleID:       "PFR-WF-004",
 				AnalyzerID:   ID,
 				Severity:     finding.SeverityHigh,
@@ -457,10 +630,11 @@ func ruleExpressionInjection(doc parser.Document) []finding.Finding {
 				Locations:   locations(doc.Path, positions...),
 				Evidence:    evidence,
 				Limitations: limitations,
-			})
+			}) {
+				return
+			}
 		}
 	}
-	return out
 }
 
 // untrustedExpressionsIn returns the attacker-controlled properties referenced
@@ -468,8 +642,9 @@ func ruleExpressionInjection(doc parser.Document) []finding.Finding {
 func untrustedExpressionsIn(script string) []string {
 	var found []string
 	for _, expr := range expressions(script) {
+		normalized := normalizeExpression(expr)
 		for _, property := range untrustedExpressionProperties {
-			if strings.Contains(expr, property) {
+			if strings.Contains(normalized, property) {
 				found = append(found, property)
 				break
 			}
@@ -502,15 +677,14 @@ func expressions(s string) []string {
 // PFR-WF-005: secrets exposed to untrusted execution
 // ----------------------------------------------------------------------------
 
-func ruleSecretsToUntrustedExecution(doc parser.Document) []finding.Finding {
+func ruleSecretsToUntrustedExecution(doc parser.Document, b *budget) {
 	trigger, ok := firstTrigger(doc, privilegedUntrustedTriggers)
 	if !ok {
-		return nil
+		return
 	}
 
-	var out []finding.Finding
 	for _, job := range doc.Jobs {
-		checkout, ref, hasUntrustedCode := untrustedCheckout(job)
+		checkout, ref, checkoutSource, hasUntrustedCode := untrustedCheckout(job)
 		if !hasUntrustedCode {
 			continue
 		}
@@ -522,7 +696,7 @@ func ruleSecretsToUntrustedExecution(doc parser.Document) []finding.Finding {
 			continue
 		}
 
-		out = append(out, finding.Finding{
+		if !b.add(finding.Finding{
 			RuleID:       "PFR-WF-005",
 			AnalyzerID:   ID,
 			Severity:     finding.SeverityHigh,
@@ -540,7 +714,7 @@ func ruleSecretsToUntrustedExecution(doc parser.Document) []finding.Finding {
 				},
 				{
 					Kind:    "workflow_privileged_checkout",
-					Source:  pointer("jobs", job.ID.Value, "checkout ref"),
+					Source:  checkoutSource,
 					Excerpt: ref.Value,
 				},
 			},
@@ -548,9 +722,10 @@ func ruleSecretsToUntrustedExecution(doc parser.Document) []finding.Finding {
 				"Whether the named secret is populated in this repository is a GitHub setting offline analysis cannot read.",
 				"An environment protection rule requiring approval before the secret is issued cannot be observed from the repository contents.",
 			},
-		})
+		}) {
+			return
+		}
 	}
-	return out
 }
 
 // jobSecretReference finds the first secret this job hands to its steps, and
@@ -588,7 +763,7 @@ func jobSecretReference(job parser.Job) (parser.Scalar, string, bool) {
 
 func referencesSecret(value string) bool {
 	for _, expr := range expressions(value) {
-		if strings.Contains(expr, "secrets.") {
+		if strings.Contains(normalizeExpression(expr), "secrets.") {
 			return true
 		}
 	}
@@ -599,20 +774,19 @@ func referencesSecret(value string) bool {
 // PFR-WF-006: persistence on a self-hosted runner
 // ----------------------------------------------------------------------------
 
-func ruleSelfHostedRunner(doc parser.Document) []finding.Finding {
+func ruleSelfHostedRunner(doc parser.Document, b *budget) {
 	trigger, ok := firstTrigger(doc, untrustedInputTriggers)
 	if !ok {
-		return nil
+		return
 	}
 
-	var out []finding.Finding
 	for _, job := range doc.Jobs {
 		label, isSelfHosted := selfHostedLabel(job)
 		if !isSelfHosted {
 			continue
 		}
 
-		out = append(out, finding.Finding{
+		if !b.add(finding.Finding{
 			RuleID:       "PFR-WF-006",
 			AnalyzerID:   ID,
 			Severity:     finding.SeverityHigh,
@@ -633,9 +807,10 @@ func ruleSelfHostedRunner(doc parser.Document) []finding.Finding {
 				"An approved ephemeral-runner policy, which would make this safe, is an organization setting offline analysis cannot read.",
 				"Runner group membership and its access restrictions are not visible from the repository contents.",
 			},
-		})
+		}) {
+			return
+		}
 	}
-	return out
 }
 
 func selfHostedLabel(job parser.Job) (parser.Scalar, bool) {

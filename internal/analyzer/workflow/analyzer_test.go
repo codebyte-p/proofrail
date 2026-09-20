@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -276,6 +277,31 @@ func TestMustDetectFixturesAreLabeled(t *testing.T) {
 			if !strings.Contains(content, "must_detect: "+tc.rule) {
 				t.Errorf("fixture %s is not labeled `must_detect: %s`", tc.malicious, tc.rule)
 			}
+		})
+	}
+
+	// A variant is an independent fixture, so it carries its own label; naming
+	// the fixture it is an equivalent spelling of is what lets a reviewer see
+	// that the corpus covers a scenario in every syntax GitHub accepts rather
+	// than counting one scenario several times.
+	for _, vc := range variantCases() {
+		t.Run(vc.file, func(t *testing.T) {
+			content := string(fixture(t, vc.class, vc.file))
+			label := "must_detect: "
+			if vc.class == "benign" {
+				label = "expected_clean: "
+			}
+			for _, rule := range vc.rules {
+				if !strings.Contains(content, label+rule) {
+					t.Errorf("fixture %s is not labeled `%s%s`", vc.file, label, rule)
+				}
+			}
+			if !strings.Contains(content, "variant_of: "+vc.canonical) {
+				t.Errorf("fixture %s does not declare `variant_of: %s`", vc.file, vc.canonical)
+			}
+			// The named canonical fixture has to exist, or the label points at
+			// a scenario nothing measures.
+			fixture(t, vc.class, vc.canonical)
 		})
 	}
 }
@@ -574,6 +600,289 @@ func TestAnalyzerSkipsDeletedWorkflows(t *testing.T) {
 	}
 	if len(result.CoverageNotes) == 0 {
 		t.Error("a skipped entry must appear in the coverage notes")
+	}
+}
+
+// variantCase is one equivalent spelling of a canonical fixture.
+//
+// GitHub accepts several spellings of the same expression, so each spelling is
+// an independent fixture rather than a footnote on the original: a corpus that
+// only carries the lowercase dotted form measures nothing about the forms an
+// attacker actually writes.
+type variantCase struct {
+	class     string // malicious or benign
+	file      string
+	canonical string   // the fixture this one is an equivalent spelling of
+	rules     []string // malicious: rules that must fire; benign: rules that must stay silent
+}
+
+func variantCases() []variantCase {
+	return []variantCase{
+		{
+			class:     "malicious",
+			file:      "pfr-wf-001-bracket-notation-ref.yml",
+			canonical: "pfr-wf-001-privileged-untrusted-checkout.yml",
+			rules:     []string{"PFR-WF-001", "PFR-WF-004"},
+		},
+		{
+			class:     "malicious",
+			file:      "pfr-wf-001-uppercase-context-ref.yml",
+			canonical: "pfr-wf-001-privileged-untrusted-checkout.yml",
+			rules:     []string{"PFR-WF-001", "PFR-WF-004"},
+		},
+		{
+			class:     "malicious",
+			file:      "pfr-wf-001-raw-git-checkout.yml",
+			canonical: "pfr-wf-001-privileged-untrusted-checkout.yml",
+			rules:     []string{"PFR-WF-001"},
+		},
+		{
+			class:     "malicious",
+			file:      "pfr-wf-005-capitalized-secrets.yml",
+			canonical: "pfr-wf-005-secrets-to-untrusted.yml",
+			rules:     []string{"PFR-WF-005"},
+		},
+		{
+			class:     "malicious",
+			file:      "pfr-wf-005-bracket-secrets.yml",
+			canonical: "pfr-wf-005-secrets-to-untrusted.yml",
+			rules:     []string{"PFR-WF-005"},
+		},
+		{
+			class:     "benign",
+			file:      "pfr-wf-001-bracket-base-ref.yml",
+			canonical: "pfr-wf-001-base-checkout.yml",
+			rules:     []string{"PFR-WF-001"},
+		},
+		{
+			class:     "benign",
+			file:      "pfr-wf-001-ordinary-git-fetch.yml",
+			canonical: "pfr-wf-001-base-checkout.yml",
+			rules:     []string{"PFR-WF-001"},
+		},
+		{
+			class:     "benign",
+			file:      "pfr-wf-004-bracket-safe-property.yml",
+			canonical: "pfr-wf-004-env-indirection.yml",
+			rules:     []string{"PFR-WF-004"},
+		},
+	}
+}
+
+// decisionFor returns the decision hint the analyzer contract fixes for a rule,
+// so a variant is held to its canonical fixture's classification rather than to
+// a value copied into this test.
+func decisionFor(t *testing.T, rule string) finding.Decision {
+	t.Helper()
+	for _, tc := range ruleCases() {
+		if tc.rule == rule {
+			return tc.decision
+		}
+	}
+	t.Fatalf("no rule case for %s", rule)
+	return ""
+}
+
+// TestVariantFixturesMatchTheirCanonicalFixture proves an equivalent spelling
+// produces an equivalent judgement: the same rules with the same decision on a
+// malicious variant, silence on a safe one.
+func TestVariantFixturesMatchTheirCanonicalFixture(t *testing.T) {
+	for _, vc := range variantCases() {
+		t.Run(vc.file, func(t *testing.T) {
+			result := analyze(t, addedWorkflow(t, vc.class, vc.file))
+
+			if result.Completion != run.CompletionComplete {
+				t.Fatalf("completion = %q, want complete (diagnostics: %+v)", result.Completion, result.Diagnostics)
+			}
+
+			for _, rule := range vc.rules {
+				matches := findingsFor(result, rule)
+				if vc.class == "benign" {
+					if len(matches) != 0 {
+						t.Errorf("%s fired on a safe spelling: %+v", rule, matches)
+					}
+					continue
+				}
+				if len(matches) != 1 {
+					t.Fatalf("expected exactly one %s finding, got %d (all rules: %v)", rule, len(matches), ruleIDs(result))
+				}
+				if want := decisionFor(t, rule); matches[0].DecisionHint != want {
+					t.Errorf("%s decision hint = %q, want %q", rule, matches[0].DecisionHint, want)
+				}
+			}
+		})
+	}
+}
+
+// TestPermissionRuleIgnoresScopeNarrowing proves PFR-WF-002 compares effective
+// capability rather than where a grant is written.
+//
+// Moving a workflow-wide write scope down to the single job that needs it is
+// the recommended hardening, and renaming a job changes no capability at all.
+// Reporting either as newly granted -- and hardening it to block on an
+// untrusted trigger -- punishes the fix.
+func TestPermissionRuleIgnoresScopeNarrowing(t *testing.T) {
+	workflowWide := "name: release\non: pull_request_target\npermissions:\n  contents: write\njobs:\n" +
+		"  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: make release\n"
+	jobScoped := "name: release\non: pull_request_target\njobs:\n" +
+		"  build:\n    runs-on: ubuntu-latest\n    permissions:\n      contents: write\n    steps:\n      - run: make release\n"
+	renamed := "name: release\non: pull_request_target\njobs:\n" +
+		"  publish:\n    runs-on: ubuntu-latest\n    permissions:\n      contents: write\n    steps:\n      - run: make release\n"
+
+	for _, tc := range []struct {
+		name string
+		base string
+		head string
+	}{
+		{"narrowed to one job", workflowWide, jobScoped},
+		{"job renamed", jobScoped, renamed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result := analyze(t, gitdiff.FileChange{
+				Path:        ".github/workflows/release.yml",
+				Kind:        gitdiff.Modified,
+				Mode:        gitdiff.ModeFile,
+				BaseContent: []byte(tc.base),
+				HeadContent: []byte(tc.head),
+			})
+
+			if matches := findingsFor(result, "PFR-WF-002"); len(matches) != 0 {
+				t.Fatalf("PFR-WF-002 reported a capability the head revision did not gain: %+v", matches)
+			}
+		})
+	}
+}
+
+// TestPermissionRuleStillReportsANewScope keeps the narrowing fix from
+// over-reaching: a scope the base revision never granted is still a finding,
+// and the job that gained it still has to be identifiable from the evidence and
+// the location.
+func TestPermissionRuleStillReportsANewScope(t *testing.T) {
+	base := "name: release\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    permissions:\n      contents: write\n    steps:\n      - run: make release\n"
+	head := "name: release\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    permissions:\n      contents: write\n      packages: write\n    steps:\n      - run: make release\n"
+
+	result := analyze(t, gitdiff.FileChange{
+		Path:        ".github/workflows/release.yml",
+		Kind:        gitdiff.Modified,
+		Mode:        gitdiff.ModeFile,
+		BaseContent: []byte(base),
+		HeadContent: []byte(head),
+	})
+
+	matches := findingsFor(result, "PFR-WF-002")
+	if len(matches) != 1 {
+		t.Fatalf("expected one PFR-WF-002 finding, got %d (%v)", len(matches), ruleIDs(result))
+	}
+	if !strings.Contains(matches[0].Message, "packages") {
+		t.Errorf("message does not name the newly granted scope: %q", matches[0].Message)
+	}
+	if strings.Contains(matches[0].Message, "contents") {
+		t.Errorf("message reports a scope the base revision already granted: %q", matches[0].Message)
+	}
+	var named bool
+	for _, e := range matches[0].Evidence {
+		if strings.Contains(e.Excerpt, "build") {
+			named = true
+		}
+	}
+	if !named {
+		t.Errorf("evidence does not identify the job that gained the scope: %+v", matches[0].Evidence)
+	}
+	if !hasLocationLine(matches[0], ".github/workflows/release.yml", 8) {
+		t.Errorf("locations %+v do not point at the line that granted the scope", matches[0].Locations)
+	}
+}
+
+// manyMutableActions builds a workflow whose steps each trip PFR-WF-003, which
+// is the cheapest way to drive the analyzer at a finding ceiling.
+func manyMutableActions(n int) []byte {
+	var b strings.Builder
+	b.WriteString("name: lint\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n")
+	for i := 0; i < n; i++ {
+		b.WriteString("      - uses: some-vendor/lint-action@v" + strconv.Itoa(i) + "\n")
+	}
+	return []byte(b.String())
+}
+
+func analyzeWithLimits(t *testing.T, limits run.Limits, files ...gitdiff.FileChange) run.AnalyzerResult {
+	t.Helper()
+	in := inputWith(files...)
+	in.Limits = limits
+	return workflowanalyzer.New().Analyze(context.Background(), in)
+}
+
+// TestFindingBudgetBoundsGeneration proves the ceiling bounds the work rather
+// than only the output.
+//
+// Finalizing -- redaction plus a SHA-256 -- every candidate and truncating
+// afterwards let a hostile workflow buy unbounded work, and a budget failure
+// has to carry a diagnostic so the run goes incomplete instead of quietly
+// truncated.
+func TestFindingBudgetBoundsGeneration(t *testing.T) {
+	limits := run.DefaultLimits()
+	limits.MaxFindings = 5
+
+	result := analyzeWithLimits(t, limits, gitdiff.FileChange{
+		Path:        ".github/workflows/lint.yml",
+		Kind:        gitdiff.Added,
+		Mode:        gitdiff.ModeFile,
+		HeadContent: manyMutableActions(12),
+	})
+
+	if result.Completion != run.CompletionFailed {
+		t.Fatalf("completion = %q, want failed when the finding budget is exceeded", result.Completion)
+	}
+	if len(result.Findings) > limits.MaxFindings {
+		t.Errorf("returned %d findings, above the %d ceiling", len(result.Findings), limits.MaxFindings)
+	}
+	var budgeted bool
+	for _, d := range result.Diagnostics {
+		if strings.Contains(d.Code, "budget") {
+			budgeted = true
+		}
+	}
+	if !budgeted {
+		t.Errorf("a budget failure must explain itself with a diagnostic, got %+v", result.Diagnostics)
+	}
+
+	// Generating twelve candidates and keeping the five with the lowest
+	// fingerprints would prove the ceiling was applied to the output after the
+	// work was already paid for. Stopping at the ceiling keeps the first five
+	// the rules produced, which are the first five steps in document order.
+	kept := make(map[string]bool)
+	for _, f := range result.Findings {
+		for _, e := range f.Evidence {
+			kept[e.Excerpt] = true
+		}
+	}
+	for i := 0; i < 12; i++ {
+		ref := "some-vendor/lint-action@v" + strconv.Itoa(i)
+		if got, want := kept[ref], i < limits.MaxFindings; got != want {
+			t.Errorf("step %s kept = %v, want %v: candidates are generated past the ceiling", ref, got, want)
+		}
+	}
+}
+
+// TestFindingBudgetReachedIsNotExceeded holds the strict ceiling semantics the
+// analyzer has always had: a run that produces exactly MaxFindings dropped
+// nothing, so it stays complete. Calling a full-but-intact run a budget failure
+// would turn a clean result into exit code 2.
+func TestFindingBudgetReachedIsNotExceeded(t *testing.T) {
+	limits := run.DefaultLimits()
+	limits.MaxFindings = 5
+
+	result := analyzeWithLimits(t, limits, gitdiff.FileChange{
+		Path:        ".github/workflows/lint.yml",
+		Kind:        gitdiff.Added,
+		Mode:        gitdiff.ModeFile,
+		HeadContent: manyMutableActions(5),
+	})
+
+	if result.Completion != run.CompletionComplete {
+		t.Fatalf("completion = %q, want complete when nothing was dropped (diagnostics: %+v)", result.Completion, result.Diagnostics)
+	}
+	if len(result.Findings) != 5 {
+		t.Fatalf("expected exactly 5 findings, got %d", len(result.Findings))
 	}
 }
 

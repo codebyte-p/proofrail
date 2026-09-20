@@ -361,6 +361,11 @@ func TestMustDetectFixturesAreLabeled(t *testing.T) {
 	labels := string(fixture(t, "malicious", "MUST_DETECT.txt"))
 	for _, want := range []string{
 		"PFR-DEP-001 pfr-dep-001-manifest-lock-mismatch.head.json",
+		// A mutable or outside source is a Gate 1 must-detect scenario in its
+		// own right, so each canonical spelling of one is labeled here.
+		"PFR-DEP-002 pfr-dep-002-git-dependency.json",
+		"PFR-DEP-002 pfr-dep-002-url-dependency.json",
+		"PFR-DEP-002 pfr-dep-002-path-escape.json",
 		"PFR-DEP-004 pfr-dep-004-source-changed.head.json",
 	} {
 		if !strings.Contains(labels, want) {

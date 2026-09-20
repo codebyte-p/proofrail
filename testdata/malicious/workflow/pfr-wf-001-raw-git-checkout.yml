@@ -1,0 +1,14 @@
+# must_detect: PFR-WF-001
+# variant_of: pfr-wf-001-privileged-untrusted-checkout.yml
+# actions/checkout is not the only way to land a fork's commits on a privileged
+# runner: raw Git fetches the pull-request ref and checks it out by hand.
+name: pr-preview
+on: pull_request_target
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          git fetch origin +refs/pull/*/head:refs/remotes/pr/*
+          git checkout pr/${{ github.event.number }}
+      - run: npm test
